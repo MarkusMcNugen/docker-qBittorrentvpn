@@ -8,7 +8,7 @@ clear_env() {
   local v
   for v in $(compgen -e); do
     case "$v" in
-      VPN_* | LAN_NETWORK | NAME_SERVERS | PUID | PGID | UMASK | WEBUI_* | INCOMING_PORT* | FIREWALL_BACKEND | WIREGUARD_* | NATPMP_* | PIA_* | QBT_* | DEBUG) unset "$v" ;;
+      VPN_* | LAN_NETWORK | NAME_SERVERS | PUID | PGID | UMASK | WEBUI_* | INCOMING_PORT* | FIREWALL_BACKEND | WIREGUARD_* | NATPMP_* | PIA_* | QBT_* | PRIVOXY_* | DEBUG) unset "$v" ;;
     esac
   done
 }
@@ -29,6 +29,33 @@ test_defaults() {
   assert_eq "1.1.1.1 9.9.9.9" "${CFG_DNS_FALLBACK[*]}"
   assert_eq auto "$CFG_FIREWALL_BACKEND"
   assert_eq 25 "$CFG_WG_KEEPALIVE"
+  assert_eq no "$CFG_PRIVOXY_ENABLED"
+  assert_eq 8118 "$CFG_PRIVOXY_PORT"
+  assert_eq 0 "${#CFG_PRIVOXY_CONF[@]}"
+}
+
+test_privoxy_options_from_the_environment() {
+  clear_env
+  export PRIVOXY_ENABLED=yes PRIVOXY_PORT=08119 PRIVOXY_CONF_SOCKET_TIMEOUT=' 600 ' \
+    PRIVOXY_CONF_forward=$'/ .\n.example.invalid 10.0.0.1:3128\n'
+  load_config
+  assert_eq yes "$CFG_PRIVOXY_ENABLED"
+  assert_eq 8119 "$CFG_PRIVOXY_PORT"
+  assert_eq $'socket-timeout 600\nforward / .\nforward .example.invalid 10.0.0.1:3128' "$(printf '%s\n' "${CFG_PRIVOXY_CONF[@]}")" \
+    "variables in byte order of their names, each one's lines in order"
+}
+
+test_privoxy_refusals_apply_only_when_it_is_enabled() {
+  clear_env
+  PUID=874 load_config
+  PRIVOXY_CONF_LISTEN_ADDRESS=0.0.0.0:3128 load_config
+  export PRIVOXY_ENABLED=yes
+  PRIVOXY_PORT=0 assert_fails load_config
+  PRIVOXY_PORT=8080 assert_fails load_config
+  PUID=874 assert_fails load_config
+  PGID=874 assert_fails load_config
+  PRIVOXY_CONF_LISTEN_ADDRESS=0.0.0.0:3128 assert_fails load_config
+  PRIVOXY_CONF_=1 assert_fails load_config
 }
 
 test_previous_image_spellings() {

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Prints what the container is doing: health, VPN state, tunnel address,
-# public IP as seen through the tunnel, DNS, forwarded port, firewall policy
-# and qBittorrent's version. Run with: docker exec <container> qbtvpn-status
+# public IP as seen through the tunnel, DNS, forwarded port, firewall policy,
+# Privoxy when PRIVOXY_ENABLED=yes, and qBittorrent's version. Run with:
+# docker exec <container> qbtvpn-status
 set -u
 . /usr/local/lib/qbtvpn/common.sh
 . /usr/local/lib/qbtvpn/openvpn.sh
@@ -43,6 +44,18 @@ for ipt in iptables-nft iptables-legacy ip6tables-nft ip6tables-legacy; do
     awk '/^-P|QBTVPN_TUNNEL_IN -p/' <<<"$out"
   fi
 done
+
+if [ -s "$QBTVPN_RUN/state/privoxy" ]; then
+  section "privoxy"
+  read -r port pid rest <"$QBTVPN_RUN/state/privoxy"
+  if ! is_uint "$port"; then
+    echo "${port} ${pid} ${rest}"
+  elif kill -0 "$pid" 2>/dev/null; then
+    echo "listening on port ${port} (pid ${pid})"
+  else
+    echo "not running; it last ran as pid ${pid} on port ${port}"
+  fi
+fi
 
 section "qbittorrent"
 qbittorrent-nox --version 2>&1

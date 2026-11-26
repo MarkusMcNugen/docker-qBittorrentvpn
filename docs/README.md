@@ -8,6 +8,7 @@
 ## How-to
 
 - [Port forwarding](Port-Forwarding.md): ProtonVPN, Private Internet Access, other NAT-PMP providers and fixed ports
+- [Other containers through the tunnel](Other-Containers.md): another container sharing this one's VPN and kill switch, with Soulseek as the example
 - [Troubleshooting](Troubleshooting.md): log lines, WebUI access, shared networks
 - [Building and testing](Building.md): build arguments and the test suites
 

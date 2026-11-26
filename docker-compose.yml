@@ -14,11 +14,14 @@ services:
       # For OpenVPN providers that log in with a username and password:
       # VPN_USERNAME: your-vpn-username
       # VPN_PASSWORD: your-vpn-password
+      # An HTTP proxy on port 8118 whose traffic uses the tunnel; publish 8118 below too:
+      # PRIVOXY_ENABLED: "yes"
     volumes:
       - ./config:/config
       - ./downloads:/downloads
     ports:
       - 8080:8080
+      # - 8118:8118
     restart: unless-stopped
     # Longer than QBT_STOP_TIMEOUT (120 s), so qBittorrent can save its resume data.
     stop_grace_period: 150s

@@ -8,6 +8,7 @@ NET_GW=""        # its gateway; empty for an on-link default route
 NET_ADDR=""      # its IPv4 address
 NET_LOCAL=()     # "dev cidr" for each directly connected IPv4 subnet outside the tunnel
 NET_RESOLVERS=() # nameservers of the resolv.conf the container started with
+NET_SYSCTL="${NET_SYSCTL:-/proc/sys/net}" # the kernel's network settings
 
 # Exits when the container shares the host's network namespace, where the
 # firewall this image installs would replace the host's own.
@@ -157,6 +158,19 @@ resolve_ipv4() {
 
 ipv6_active() {
   [ -r /proc/net/if_inet6 ] && awk '$6 != "lo" { found = 1 } END { exit !found }' /proc/net/if_inet6
+}
+
+# True when an interface created now could not take an IPv6 address: the
+# kernel has no IPv6, or this network namespace switches it off for all
+# interfaces or for new ones, whose settings are copied from `default`.
+ipv6_disabled() {
+  local f
+  for f in "$NET_SYSCTL/ipv6/conf/all/disable_ipv6" "$NET_SYSCTL/ipv6/conf/default/disable_ipv6"; do
+    if [ ! -r "$f" ] || [ "$(cat "$f")" = 1 ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Removes IPv6 addresses and routes from every interface but loopback. Used

@@ -20,6 +20,7 @@ setup() {
   FW_REJECT=yes
   CFG_WEBUI_PORT=8080
   CFG_INPUT_PORTS=(9117)
+  CFG_PRIVOXY_PORT=8118
   CFG_PUID=99
   CFG_BLOCK_DOCKER_DNS=yes
 }
@@ -103,6 +104,40 @@ test_root_puid_gets_no_owner_exception() {
   assert_not_contains 'uid-owner' "$(fw_render_v4_final)"
 }
 
+test_privoxy_has_no_rules_unless_enabled() {
+  setup
+  assert_not_contains 'PRIVOXY' "$(fw_render_v4_final)"
+  assert_not_contains 'PRIVOXY' "$(fw_render_v6_final)"
+  assert_not_contains '--dport 8118' "$(fw_render_v4_final)"
+}
+
+test_privoxy_port_only_from_local_networks_and_its_connections_only_into_the_tunnel() {
+  setup
+  FW_PRIVOXY_UID=874
+  local v4 v6
+  v4=$(fw_render_v4_final)
+  v6=$(fw_render_v6_final)
+  assert_contains '-A INPUT -i eth0 -s 172.17.0.0/16 -p tcp --dport 8118 -j ACCEPT' "$v4"
+  assert_contains '-A INPUT -i eth0 -s 192.168.1.0/24 -p tcp --dport 8118 -j ACCEPT' "$v4"
+  assert_not_contains 'QBTVPN_TUNNEL_IN -p tcp --dport 8118' "$v4"
+  assert_eq '-A OUTPUT -m owner --uid-owner 874 -m conntrack --ctstate NEW -j QBTVPN_PRIVOXY_OUT' \
+    "$(awk '/^-A OUTPUT/' <<<"$v4" | head -n 1)" "the first OUTPUT rule, ahead of loopback"
+  assert_eq $'-A QBTVPN_PRIVOXY_OUT -o wg0 -j RETURN\n-A QBTVPN_PRIVOXY_OUT -p udp --dport 53 -j RETURN\n-A QBTVPN_PRIVOXY_OUT -p tcp --dport 53 -j RETURN\n-A QBTVPN_PRIVOXY_OUT -j REJECT --reject-with icmp-admin-prohibited' \
+    "$(awk '/^-A QBTVPN_PRIVOXY_OUT/' <<<"$v4")"
+  assert_eq '-A OUTPUT -m owner --uid-owner 874 -m conntrack --ctstate NEW -j QBTVPN_PRIVOXY_OUT' \
+    "$(awk '/^-A OUTPUT/' <<<"$v6" | head -n 1)" "IPv6 too"
+  assert_contains '-A QBTVPN_PRIVOXY_OUT -j REJECT --reject-with icmp6-adm-prohibited' "$v6"
+  assert_not_contains '--dport 8118' "$v6"
+}
+
+test_privoxy_gets_no_rules_without_the_owner_match() {
+  setup
+  FW_PRIVOXY_UID=874
+  FW_OWNER=no
+  assert_not_contains 'PRIVOXY' "$(fw_render_v4_final)"
+  assert_not_contains '--dport 8118' "$(fw_render_v4_final)"
+}
+
 test_v6_final_leaves_only_through_the_tunnel() {
   setup
   local v6
@@ -120,29 +155,32 @@ test_lockdown_allows_root_dns_to_non_loopback_resolvers_only() {
   assert_eq 3 "$(awk '/^-A OUTPUT/' <<<"$v4" | wc -l)"
 }
 
-# Every rendered ruleset passes iptables-restore --test on each backend the
-# kernel offers; at least one backend must be present.
+# Every rendered ruleset, with Privoxy off and on, passes iptables-restore
+# --test on each backend the kernel offers; at least one backend must be present.
 test_kernel_accepts_every_ruleset() {
   setup
-  local backend checked=0 r file
+  local backend checked=0 r file uid
   for backend in nft legacy; do
     if ! "iptables-${backend}" -w 5 -S >/dev/null 2>&1; then
       echo "backend ${backend}: not available in this kernel"
       continue
     fi
-    for r in fw_render_v4_lockdown fw_render_v4_final; do
-      file="$QBTVPN_RUN/${r}.rules"
-      "$r" >"$file"
-      assert_succeeds "iptables-${backend}-restore" --test "$file"
-    done
-    if "ip6tables-${backend}" -w 5 -S >/dev/null 2>&1; then
-      for r in fw_render_v6_lockdown fw_render_v6_final; do
+    for uid in "" 874; do
+      FW_PRIVOXY_UID="$uid"
+      for r in fw_render_v4_lockdown fw_render_v4_final; do
         file="$QBTVPN_RUN/${r}.rules"
         "$r" >"$file"
-        assert_succeeds "ip6tables-${backend}-restore" --test "$file"
+        assert_succeeds "iptables-${backend}-restore" --test "$file"
       done
-    fi
-    echo "backend ${backend}: every ruleset accepted"
+      if "ip6tables-${backend}" -w 5 -S >/dev/null 2>&1; then
+        for r in fw_render_v6_lockdown fw_render_v6_final; do
+          file="$QBTVPN_RUN/${r}.rules"
+          "$r" >"$file"
+          assert_succeeds "ip6tables-${backend}-restore" --test "$file"
+        done
+      fi
+    done
+    echo "backend ${backend}: every ruleset accepted, with Privoxy off and on"
     checked=$((checked + 1))
   done
   [ "$checked" -gt 0 ] || { echo "no iptables backend available: run the unit tests with --cap-add NET_ADMIN"; return 1; }

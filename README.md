@@ -49,6 +49,8 @@ The image compiles the newest qBittorrent and libtorrent releases from signed so
 - qBittorrent bound to the tunnel interface and run as PUID:PGID with no Linux capabilities; OpenVPN runs as its own user with only `CAP_NET_ADMIN`
 - The tunnel recovers in place while qBittorrent keeps running; a tunnel down longer than `VPN_RECOVERY_TIMEOUT` restarts the container
 - Port forwarding for ProtonVPN and other NAT-PMP providers, Private Internet Access, and fixed ports ([setup](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Port-Forwarding.md))
+- An optional Privoxy HTTP proxy whose traffic uses only the tunnel ([settings](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Configuration.md#privoxy))
+- Other containers, such as a Soulseek client, can share the tunnel and its kill switch ([example](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Other-Containers.md))
 - WebUI username and password from environment variables or Docker secrets
 - Any qBittorrent setting from an environment variable through `QBT_CONF_*`
 - Existing 1.x setups keep working: same folders, same variables
@@ -115,7 +117,7 @@ Start-up runs in a fixed order:
 4. The VPN starts, then DNS is pointed at the VPN's servers. Lookups to any other server, including Docker's at 127.0.0.11, are dropped.
 5. qBittorrent starts bound to the tunnel interface.
 
-The end-to-end tests run this against real WireGuard and OpenVPN servers in containers. They record every packet the container sends on its network and fail on any packet that is not VPN transport or a WebUI reply. The full rule set, and how to check it yourself, are on the [kill switch page](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Kill-Switch.md).
+The end-to-end tests run this against real WireGuard and OpenVPN servers in containers. They record every packet the container sends on its network and fail on any packet that is not VPN transport or a WebUI or Privoxy reply. The full rule set, and how to check it yourself, are on the [kill switch page](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Kill-Switch.md).
 
 ## Configuration
 
@@ -139,12 +141,13 @@ The settings most setups touch. Every variable, with its default, is in the [con
 | `INCOMING_PORT` | from qBittorrent | Listen port, for providers that forward a fixed port |
 | `WEBUI_USERNAME`, `WEBUI_PASSWORD` | none | WebUI login, applied on every start |
 | `QBT_CONF_<Section>__<Key>` | none | Any qBittorrent.conf setting, such as `QBT_CONF_BitTorrent__Session__MaxConnections=500` |
+| `PRIVOXY_ENABLED` | `no` | `yes` starts Privoxy on port 8118 (`PRIVOXY_PORT`); publish that port too |
 
 </details>
 
 | Volume | Holds |
 |---|---|
-| `/config` | `openvpn/`, `wireguard/` and qBittorrent's profile in `qBittorrent/` |
+| `/config` | `openvpn/`, `wireguard/`, qBittorrent's profile in `qBittorrent/`, and your own Privoxy rules in `privoxy/` |
 | `/downloads` | The default save path |
 
 The container needs `NET_ADMIN` and `/dev/net/tun`. It refuses to start with host networking, where its firewall would replace the host's.
@@ -165,7 +168,7 @@ Pull the new image and start it with the same volumes and variables. The OpenVPN
 | `build/` | Version resolution, verified source download, the compile script |
 | `keys/` | The OpenPGP key qBittorrent's tarballs are signed with |
 | `rootfs/usr/local/bin/` | `qbtvpn-entrypoint`, `qbtvpn-healthcheck`, `qbtvpn-status` |
-| `rootfs/usr/local/lib/qbtvpn/` | Firewall, network, DNS, OpenVPN, WireGuard, port forwarding and qBittorrent configuration |
+| `rootfs/usr/local/lib/qbtvpn/` | Firewall, network, DNS, OpenVPN, WireGuard, port forwarding, Privoxy and qBittorrent configuration |
 | `tests/` | Unit tests, end-to-end leak tests and their test doubles |
 | `docs/` | The documentation |
 | `.github/workflows/` | CI on every branch but `main`; scheduled publishing from `main` |
@@ -186,7 +189,7 @@ Published for `linux/amd64` and `linux/arm64`. Any Docker or Podman host whose k
 
 ## Documentation
 
-The [docs folder](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/README.md) holds the quick start, provider setup, port forwarding, the kill switch, the commands, troubleshooting and the full configuration reference.
+The [docs folder](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/README.md) holds the quick start, provider setup, port forwarding, other containers through the tunnel, the kill switch, the commands, troubleshooting and the full configuration reference.
 
 ## License
 

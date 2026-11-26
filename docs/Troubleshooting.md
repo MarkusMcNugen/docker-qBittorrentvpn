@@ -21,6 +21,8 @@ Set `DEBUG=yes` to trace every start-up command.
 | `kernel refused a WireGuard interface` | The host kernel has no WireGuard module; `wireguard-go` is used unless `WIREGUARD_USERSPACE=no`. |
 | `nat-pmp: no mapping from` | The reason is in brackets. `the gateway does not support nat-pmp` means the server or the configuration has no port forwarding; for ProtonVPN, use a P2P server and `+pmp`. See [Port forwarding](Port-Forwarding.md). |
 | `/downloads is not writable` | Set `PUID`/`PGID` to the folder's owner, or change its ownership. |
+| `privoxy: not started` | Privoxy runs only where its traffic can be kept in the tunnel: not with `VPN_ENABLED=no`, and not on a kernel without the iptables owner match. The rest of the line says which. |
+| `privoxy: the configuration was refused` | A `PRIVOXY_CONF_` option, or a file in `/config/privoxy`, that Privoxy rejects; the rest of the line is Privoxy's reason. |
 | `down for ... past VPN_RECOVERY_TIMEOUT` | The tunnel stayed down; the restart policy starts the container again. |
 
 ## The WebUI does not load
@@ -31,4 +33,4 @@ Set `DEBUG=yes` to trace every start-up command.
 
 ## Other containers cannot reach this one's services
 
-Containers that use `network_mode: service:qbittorrentvpn` share its firewall. Accept their ports from the LAN with `VPN_INPUT_PORTS`. Names of other containers do not resolve inside it while `VPN_BLOCK_DOCKER_DNS=yes`; use addresses, or `extra_hosts`.
+Containers that use `network_mode: service:qbittorrentvpn` share its firewall. Accept their ports from the LAN with `VPN_INPUT_PORTS`. Names of other containers do not resolve inside it while `VPN_BLOCK_DOCKER_DNS=yes`; use addresses, or `extra_hosts`. A joined container also loses its network when this one restarts on its own, until it is restarted too. The [other containers page](Other-Containers.md) has a full example.

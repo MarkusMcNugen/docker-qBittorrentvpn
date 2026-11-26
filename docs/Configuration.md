@@ -57,6 +57,18 @@ Every environment variable the container reads. Booleans accept `yes`/`no`, `tru
 | `TZ` | UTC | Time zone for logs and qBittorrent |
 | `DEBUG` | `no` | Trace every entrypoint command |
 
+## Privoxy
+
+An HTTP proxy for other applications, off unless enabled. Publish its port and point an application's HTTP and HTTPS proxy at `http://<docker host>:8118`. Privoxy runs as its own user with no capabilities. The firewall accepts its port from `LAN_NETWORK` and the container's own networks only, and lets its connections leave only through the tunnel; its lookups go to the container's DNS servers like everything else's.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PRIVOXY_ENABLED` | `no` | `yes` starts Privoxy once the VPN is up. It does not start with `VPN_ENABLED=no` |
+| `PRIVOXY_PORT` | `8118` | Port Privoxy listens on |
+| `PRIVOXY_CONF_<option>` | none | Adds a line to Privoxy's configuration, with `<option>` lowercased and `_` read as `-`: `PRIVOXY_CONF_SOCKET_TIMEOUT=600` adds `socket-timeout 600`. Each line of a multi-line value adds a line. The listen address comes from `PRIVOXY_PORT` only |
+
+Your own rules go in `/config/privoxy/user.action` and `/config/privoxy/user.filter`, which replace the package's sample files. They are read at start, so restart the container after changing them. While Privoxy is enabled, `PUID` and `PGID` cannot be 874, the id of its user.
+
 ## Volumes and ports
 
 | Path or port | Meaning |
@@ -65,6 +77,8 @@ Every environment variable the container reads. Booleans accept `yes`/`no`, `tru
 | `/config/wireguard` | WireGuard configuration in wg-quick format |
 | `/config/qBittorrent` | qBittorrent's profile: settings, resume data, logs |
 | `/downloads` | Default save path, with incomplete files in `/downloads/temp` |
+| `/config/privoxy` | Your Privoxy `user.action` and `user.filter`, read when `PRIVOXY_ENABLED=yes` |
 | `8080/tcp` | WebUI |
+| `8118/tcp` | Privoxy, when `PRIVOXY_ENABLED=yes` |
 
 The container needs `--cap-add NET_ADMIN` and `--device /dev/net/tun`, and refuses host networking.

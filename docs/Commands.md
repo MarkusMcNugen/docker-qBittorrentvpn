@@ -38,15 +38,16 @@ Prints these sections, in this order:
 | `dns` | The name servers in `/etc/resolv.conf` |
 | `port forwarding` | The forwarded port, or `none` |
 | `firewall` | Each chain's default policy and the ports open on the tunnel, for every iptables backend that holds the container's rules |
+| `privoxy` | Only with `PRIVOXY_ENABLED=yes`: the port Privoxy listens on and its process, or why it did not start |
 | `qbittorrent` | qBittorrent's version and its interface and listen port settings |
 
-This output comes from the end-to-end tests over WireGuard. Their test network has no internet access, so the public address reads `unreachable`.
+This output comes from the end-to-end tests over WireGuard, which run with `PRIVOXY_ENABLED=yes`. Their test network has no internet access, so the public address reads `unreachable`.
 
 ```
 $ docker exec qbittorrentvpn qbtvpn-status
 
 == health
-ok 1795657845 wireguard handshake age 20
+ok 1795674314 wireguard handshake age 22
 
 == build
 QBITTORRENT_VERSION=5.3.1
@@ -58,11 +59,11 @@ QT_VERSION=6.11.1
 == tunnel
 wg0 inet 10.13.0.2/32
   endpoint: 172.31.250.2:51820
-  latest handshake: 20 seconds ago
-  transfer: 1.96 KiB received, 2.22 KiB sent
+  latest handshake: 23 seconds ago
+  transfer: 3.06 KiB received, 4.47 KiB sent
 
 == public address through the tunnel
-curl: (6) Could not resolve host: api.ipify.org (Domain name not found)
+curl: (6) Could not resolve host: api.ipify.org (Timeout while contacting DNS servers)
 unreachable
 
 == dns
@@ -84,6 +85,9 @@ ip6tables-nft:
 -P OUTPUT DROP
 -A QBTVPN_TUNNEL_IN -p tcp -m tcp --dport 40123 -j ACCEPT
 -A QBTVPN_TUNNEL_IN -p udp -m udp --dport 40123 -j ACCEPT
+
+== privoxy
+listening on port 8118 (pid 400)
 
 == qbittorrent
 qBittorrent v5.3.1

@@ -184,19 +184,13 @@ wg_create_interface() {
   die "wireguard: wireguard-go did not create its control socket"
 }
 
-# True when the kernel has no IPv6 or the container's network namespace has it switched off.
-wg_ipv6_disabled() {
-  local f=/proc/sys/net/ipv6/conf/all/disable_ipv6
-  [ ! -r "$f" ] || [ "$(cat "$f")" = 1 ]
-}
-
 wg_up() {
   local addr mtu dev ip v6=no
   wg_create_interface
   wg setconf "$WG_IF" "$WG_CONF"
   for addr in "${WG_ADDRESSES[@]}"; do
     if [[ "$addr" == *:* ]]; then
-      if wg_ipv6_disabled; then
+      if ipv6_disabled; then
         log_warn "wireguard: IPv6 is disabled in this container; skipping address ${addr}"
         continue
       fi

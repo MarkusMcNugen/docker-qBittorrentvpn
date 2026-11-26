@@ -4,19 +4,20 @@
 # Start-up, in order: read the configuration; lock the firewall down to
 # loopback and bootstrap DNS; resolve and pin the VPN endpoints; load the
 # final kill-switch ruleset; start the VPN and wait for it; point DNS at the
-# tunnel; start port forwarding; write qBittorrent.conf; start qBittorrent.
+# tunnel; start port forwarding; write qBittorrent.conf; start qBittorrent;
+# start Privoxy when PRIVOXY_ENABLED=yes.
 #
 # Then every VPN_CHECK_INTERVAL seconds: check qBittorrent and the tunnel,
-# apply DNS and forwarded-port changes, and record health. A tunnel that
-# stays down for VPN_RECOVERY_TIMEOUT seconds stops the container, which the
-# restart policy then starts from scratch.
+# restart Privoxy if it exited, apply DNS and forwarded-port changes, and
+# record health. A tunnel that stays down for VPN_RECOVERY_TIMEOUT seconds
+# stops the container, which the restart policy then starts from scratch.
 #
-# On SIGTERM: stop port forwarding, stop qBittorrent and let it save resume
-# data, then stop the VPN. The firewall stays closed throughout.
+# On SIGTERM: stop port forwarding and Privoxy, stop qBittorrent and let it
+# save resume data, then stop the VPN. The firewall stays closed throughout.
 set -Eeuo pipefail
 shopt -s inherit_errexit
 
-for lib in common config network firewall dns openvpn wireguard vpn qbittorrent portforward; do
+for lib in common config network firewall dns openvpn wireguard vpn qbittorrent portforward privoxy; do
   # shellcheck source=/dev/null
   . "/usr/local/lib/qbtvpn/${lib}.sh"
 done
@@ -36,6 +37,7 @@ shutdown() {
   trap - TERM INT QUIT ERR
   set +e
   pf_stop
+  privoxy_stop
   qbt_stop
   vpn_stop
   state_write health "stopped $(now)"
@@ -54,6 +56,7 @@ on_exit() {
     SHUTTING_DOWN=yes
     set +e
     pf_stop
+    privoxy_stop
     qbt_stop
     vpn_stop
   fi
@@ -83,6 +86,7 @@ bootstrap_vpn() {
   while IFS= read -r line; do FW_DNS_EXCEPTIONS+=("$line"); done < <(dns_lan_exceptions)
   FW_TUNNEL_PORTS=()
   if [ -n "$CFG_INCOMING_PORT" ]; then FW_TUNNEL_PORTS=("$CFG_INCOMING_PORT"); fi
+  if [ "$CFG_PRIVOXY_ENABLED" = yes ]; then privoxy_prepare; fi
   fw_apply_final
   vpn_start
   vpn_wait_connected
@@ -158,6 +162,10 @@ supervise() {
       status=unhealthy
       detail="${detail}; WebUI not responding on port ${CFG_WEBUI_PORT}"
     fi
+    if ! privoxy_supervise; then
+      status=unhealthy
+      detail="${detail}; Privoxy not running"
+    fi
     state_write health "${status} $(now) ${detail}"
   done
 }
@@ -197,6 +205,7 @@ main() {
     fw_set_tunnel_ports "$QBT_LISTEN_PORT"
   fi
   qbt_start
+  if [ "$CFG_PRIVOXY_ENABLED" = yes ]; then privoxy_start; fi
   supervise
 }
 

@@ -63,7 +63,12 @@ SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 COPY --from=builder /out/ /
 
 # The vpn user (873) runs OpenVPN and wireguard-go with only CAP_NET_ADMIN.
-RUN apk add --no-cache \
+# The privoxy user (874) runs Privoxy with no capabilities; it is created
+# before the package, whose install script would otherwise pick its id. The
+# package installs its configuration files with a .new suffix.
+RUN addgroup -S -g 874 privoxy \
+ && adduser -S -D -H -u 874 -G privoxy -h /var/log/privoxy -s /sbin/nologin privoxy \
+ && apk add --no-cache \
         bash \
         ca-certificates \
         curl \
@@ -76,6 +81,7 @@ RUN apk add --no-cache \
         netcat-openbsd \
         openssl \
         openvpn \
+        privoxy \
         qt6-qtbase-sqlite \
         setpriv \
         tini \
@@ -90,6 +96,9 @@ RUN apk add --no-cache \
  && if [ "$INSTALL_PYTHON" = yes ]; then apk add --no-cache python3; fi \
  && addgroup -S -g 873 vpn \
  && adduser -S -D -H -u 873 -G vpn -h /run/qbtvpn -s /sbin/nologin vpn \
+ && for f in /etc/privoxy/*.new; do mv "$f" "${f%.new}"; done \
+ && [ "$(id -u privoxy)" = 874 ] \
+ && privoxy --version \
  && qbittorrent-nox --version
 
 COPY rootfs/ /
@@ -104,7 +113,7 @@ RUN chmod 0755 /usr/local/bin/qbtvpn-entrypoint /usr/local/bin/qbtvpn-healthchec
 
 ENV LANG=C.UTF-8
 
-EXPOSE 8080/tcp 8999/tcp 8999/udp
+EXPOSE 8080/tcp 8118/tcp 8999/tcp 8999/udp
 VOLUME ["/config", "/downloads"]
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \

@@ -15,7 +15,10 @@ TARGET_NAME=target.e2e
 TARGET_IP="${TARGET_IP:-172.31.251.10}"
 MAPPED_PORT="${MAPPED_PORT:-40123}"
 # dnsmasq with --no-resolv needs an upstream server or it warns; nothing
-# listens on this one, so names other than TARGET_NAME fail.
+# listens on this one, so names other than TARGET_NAME fail. TARGET_NAME is
+# a host record and --filter-AAAA answers its AAAA query with no address, as
+# a real server does for an IPv4-only name: musl's getaddrinfo fails the
+# whole lookup when either query goes unanswered.
 DNS_UPSTREAM=127.0.0.1#1
 # natpmpc refuses a public address in any private, shared, documentation or
 # other reserved range, so NAT-PMP reports this stand-in. Nothing is sent to it.
@@ -60,7 +63,7 @@ Endpoint = ${ENDPOINT_NAME:-e2e-wg}:51820
 EOF
     chmod 0644 /shared/client.conf
     dnsmasq --keep-in-foreground --listen-address=10.13.0.1 --listen-address="$(lan_ip)" --bind-dynamic --no-resolv --no-hosts \
-      --server="$DNS_UPSTREAM" --address="/${TARGET_NAME}/${TARGET_IP}" --log-queries --log-facility=- &
+      --server="$DNS_UPSTREAM" --host-record="${TARGET_NAME},${TARGET_IP}" --filter-AAAA --log-queries --log-facility=- &
     natpmp-responder.py 10.13.0.1 "$NATPMP_PUBLIC_IP" "$MAPPED_PORT" &
     echo "wg: ready, wan $(wan_if) $(wan_ip)"
     while :; do sleep 3600; done
@@ -107,7 +110,7 @@ EOF
     openvpn --config server.conf &
     for _ in $(seq 1 100); do ip -o -4 addr show dev tun0 2>/dev/null | grep -q 10.14.0.1 && break; sleep 0.2; done
     dnsmasq --keep-in-foreground --listen-address=10.14.0.1 --listen-address="$(lan_ip)" --bind-dynamic --no-resolv --no-hosts \
-      --server="$DNS_UPSTREAM" --address="/${TARGET_NAME}/${TARGET_IP}" --log-queries --log-facility=- &
+      --server="$DNS_UPSTREAM" --host-record="${TARGET_NAME},${TARGET_IP}" --filter-AAAA --log-queries --log-facility=- &
     natpmp-responder.py 10.14.0.1 "$NATPMP_PUBLIC_IP" "$MAPPED_PORT" &
     echo "ovpn: ready, wan $(wan_if) $(wan_ip)"
     while :; do sleep 3600; done

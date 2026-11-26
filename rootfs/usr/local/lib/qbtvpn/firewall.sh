@@ -12,8 +12,11 @@
 #     container's own subnets and `LAN_NETWORK`. Every other DNS packet is
 #     dropped, and Docker's resolver at 127.0.0.11 is dropped unless
 #     `VPN_BLOCK_DOCKER_DNS=no`.
-#   - Inbound: established flows, the WebUI port and `VPN_INPUT_PORTS` from
-#     local subnets, and on the tunnel only the ports in `QBTVPN_TUNNEL_IN`.
+#   - Inbound: established flows, the WebUI port, `VPN_INPUT_PORTS` and,
+#     with Privoxy enabled, `PRIVOXY_PORT` from local subnets, and on the
+#     tunnel only the ports in `QBTVPN_TUNNEL_IN`.
+#   - Privoxy's own new connections leave only through the tunnel, apart from
+#     DNS, which the rules above decide as for every other user.
 #   - IPv6 leaves only through the tunnel.
 
 FW_BACKEND=""
@@ -29,6 +32,7 @@ FW_ENDPOINTS=()      # "ip port proto"
 FW_LOCAL=()          # "dev cidr"
 FW_DNS_EXCEPTIONS=() # IPv4 nameservers on local networks that NAME_SERVERS names
 FW_TUNNEL_PORTS=()   # ports accepted inbound on the tunnel
+FW_PRIVOXY_UID=""    # Privoxy's user when it is enabled, which adds its rules
 
 fw_probe() { "iptables-$1" -w 5 -t filter -S >/dev/null 2>&1; }
 
@@ -99,22 +103,48 @@ fw_render_tunnel_chain() {
   done
 }
 
+# True when Privoxy is enabled and the owner match can confine it.
+fw_privoxy_on() { [ -n "$FW_PRIVOXY_UID" ] && [ "$FW_OWNER" = yes ]; }
+
+# fw_render_privoxy_chain v4|v6: QBTVPN_PRIVOXY_OUT, which OUTPUT sends every
+# new connection from Privoxy's user through first. Connections into the
+# tunnel and DNS return to OUTPUT, whose rules decide them as for any other
+# user; every other connection, to loopback included, is refused.
+fw_render_privoxy_chain() {
+  printf -- '-A QBTVPN_PRIVOXY_OUT -o %s -j RETURN\n' "$FW_TUN"
+  printf '%s\n' '-A QBTVPN_PRIVOXY_OUT -p udp --dport 53 -j RETURN' '-A QBTVPN_PRIVOXY_OUT -p tcp --dport 53 -j RETURN'
+  if [ "$FW_REJECT" != yes ]; then
+    printf '%s\n' '-A QBTVPN_PRIVOXY_OUT -j DROP'
+  elif [ "$1" = v4 ]; then
+    printf '%s\n' '-A QBTVPN_PRIVOXY_OUT -j REJECT --reject-with icmp-admin-prohibited'
+  else
+    printf '%s\n' '-A QBTVPN_PRIVOXY_OUT -j REJECT --reject-with icmp6-adm-prohibited'
+  fi
+  printf -- '-A OUTPUT -m owner --uid-owner %s -m conntrack --ctstate NEW -j QBTVPN_PRIVOXY_OUT\n' "$FW_PRIVOXY_UID"
+}
+
 fw_render_v4_final() {
   local l dev cidr p e ip port proto owner
+  local -a ports=("$CFG_WEBUI_PORT" "${CFG_INPUT_PORTS[@]}")
   owner=$(fw_owner_not_qbt)
-  printf '%s\n' '*filter' ':INPUT DROP [0:0]' ':FORWARD DROP [0:0]' ':OUTPUT DROP [0:0]' ':QBTVPN_TUNNEL_IN - [0:0]' \
-    '-A INPUT -i lo -j ACCEPT' \
+  printf '%s\n' '*filter' ':INPUT DROP [0:0]' ':FORWARD DROP [0:0]' ':OUTPUT DROP [0:0]' ':QBTVPN_TUNNEL_IN - [0:0]'
+  if fw_privoxy_on; then
+    printf '%s\n' ':QBTVPN_PRIVOXY_OUT - [0:0]'
+    ports+=("$CFG_PRIVOXY_PORT")
+  fi
+  printf '%s\n' '-A INPUT -i lo -j ACCEPT' \
     '-A INPUT -m conntrack --ctstate INVALID -j DROP' \
     '-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT' \
     "-A INPUT -i ${FW_TUN} -j QBTVPN_TUNNEL_IN"
   for l in "${FW_LOCAL[@]}"; do
     dev="${l%% *}"
     cidr="${l#* }"
-    for p in "$CFG_WEBUI_PORT" "${CFG_INPUT_PORTS[@]}"; do
+    for p in "${ports[@]}"; do
       printf -- '-A INPUT -i %s -s %s -p tcp --dport %s -j ACCEPT\n' "$dev" "$cidr" "$p"
     done
   done
   fw_render_tunnel_chain
+  if fw_privoxy_on; then fw_render_privoxy_chain v4; fi
   if [ "$CFG_BLOCK_DOCKER_DNS" = yes ]; then
     printf '%s\n' '-A OUTPUT -o lo -d 127.0.0.11/32 -j DROP'
   fi
@@ -140,12 +170,14 @@ fw_render_v4_final() {
 }
 
 fw_render_v6_final() {
-  printf '%s\n' '*filter' ':INPUT DROP [0:0]' ':FORWARD DROP [0:0]' ':OUTPUT DROP [0:0]' ':QBTVPN_TUNNEL_IN - [0:0]' \
-    '-A INPUT -i lo -j ACCEPT' \
+  printf '%s\n' '*filter' ':INPUT DROP [0:0]' ':FORWARD DROP [0:0]' ':OUTPUT DROP [0:0]' ':QBTVPN_TUNNEL_IN - [0:0]'
+  if fw_privoxy_on; then printf '%s\n' ':QBTVPN_PRIVOXY_OUT - [0:0]'; fi
+  printf '%s\n' '-A INPUT -i lo -j ACCEPT' \
     '-A INPUT -m conntrack --ctstate INVALID -j DROP' \
     '-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT' \
     "-A INPUT -i ${FW_TUN} -j QBTVPN_TUNNEL_IN"
   fw_render_tunnel_chain
+  if fw_privoxy_on; then fw_render_privoxy_chain v6; fi
   printf '%s\n' '-A OUTPUT -o lo -j ACCEPT' "-A OUTPUT -o ${FW_TUN} -j ACCEPT"
   if [ "$FW_REJECT" = yes ]; then
     printf '%s\n' '-A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited'

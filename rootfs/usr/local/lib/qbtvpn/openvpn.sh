@@ -153,6 +153,10 @@ ovpn_start() {
   if [ -n "$CFG_VPN_USERNAME" ]; then
     args+=(--auth-user-pass "$OVPN_DIR/.qbtvpn-credentials")
   fi
+  if ipv6_disabled; then
+    args+=(--pull-filter ignore ifconfig-ipv6 --pull-filter ignore route-ipv6)
+    log_info "openvpn: IPv6 is disabled in this container; ignoring the server's IPv6 address and routes"
+  fi
   if [ "$OVPN_IS_PIA" = yes ] && [ "$CFG_PF_MODE" != off ]; then
     args+=(--tls-verify "$QBTVPN_LIB/openvpn-hook")
   fi

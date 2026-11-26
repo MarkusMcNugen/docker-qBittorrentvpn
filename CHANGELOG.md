@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.1.0] - 2026-11-26
+
+### VPN and firewall
+- OpenVPN connects in a container with IPv6 switched off, as some NAS hosts run them: the IPv6 address and routes the server pushes are ignored instead of stopping OpenVPN.
+- OpenVPN and WireGuard treat IPv6 as off when either `net.ipv6.conf.all.disable_ipv6` or `net.ipv6.conf.default.disable_ipv6` is set, since a new interface takes its setting from `default`.
+
+### Privoxy
+- Privoxy is in the image and off by default; `PRIVOXY_ENABLED=yes` starts it on `PRIVOXY_PORT` (8118) once the VPN is up.
+- It runs as its own user with no capabilities. Its port is accepted from local networks only, and its own connections leave only through the tunnel: it cannot reach the LAN, the Docker networks or the container's loopback.
+- `PRIVOXY_CONF_<option>` adds any Privoxy setting, and `user.action` and `user.filter` in `/config/privoxy` replace the package's samples.
+- Privoxy is restarted if it exits, and `qbtvpn-status` shows it.
+
+### Documentation and releases
+- A guide to running other containers through the tunnel, with a Soulseek client as the example.
+- Each new version gets a GitHub release whose notes are its changelog section.
+
 ## [2.0.0] - 2026-11-25
 
 ### Image

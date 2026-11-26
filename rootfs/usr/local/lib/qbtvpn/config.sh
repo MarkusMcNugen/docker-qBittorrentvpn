@@ -112,6 +112,43 @@ load_config() {
     CFG_WEBUI_CSRF=$(env_bool WEBUI_CSRF_PROTECTION yes) || exit 1
   fi
   CFG_QBT_STOP_TIMEOUT=$(env_uint QBT_STOP_TIMEOUT 120 1) || exit 1
+
+  CFG_PRIVOXY_ENABLED=$(env_bool PRIVOXY_ENABLED no) || exit 1
+  CFG_PRIVOXY_PORT=$(trim "${PRIVOXY_PORT-}")
+  [ -n "$CFG_PRIVOXY_PORT" ] || CFG_PRIVOXY_PORT=8118
+  is_port "$CFG_PRIVOXY_PORT" || die "PRIVOXY_PORT must be a port number, not '${CFG_PRIVOXY_PORT}'"
+  CFG_PRIVOXY_PORT=$((10#$CFG_PRIVOXY_PORT))
+  CFG_PRIVOXY_CONF=()
+  if [ "$CFG_PRIVOXY_ENABLED" = yes ]; then
+    [ "$CFG_PRIVOXY_PORT" != "$CFG_WEBUI_PORT" ] || die "PRIVOXY_PORT and WEBUI_PORT are both ${CFG_WEBUI_PORT}; choose different ports"
+    if [ "$CFG_PUID" = 874 ] || [ "$CFG_PGID" = 874 ]; then
+      die "PUID/PGID 874 belongs to the container's privoxy user; choose another id"
+    fi
+    raw=$(privoxy_conf_from_env) || exit 1
+    while IFS= read -r item; do
+      if [ -n "$item" ]; then CFG_PRIVOXY_CONF+=("$item"); fi
+    done <<<"$raw"
+  fi
+}
+
+# Prints a Privoxy configuration line for each line of each `PRIVOXY_CONF_*`
+# variable. The option is the part after the prefix, lowercased, with
+# underscores read as hyphens; the variables come in byte order of their
+# names. Exits on a variable whose name gives no option name, and on the
+# listen address, which PRIVOXY_PORT sets.
+privoxy_conf_from_env() {
+  local name opt value
+  while IFS= read -r name; do
+    opt="${name#PRIVOXY_CONF_}"
+    opt="${opt,,}"
+    opt="${opt//_/-}"
+    [[ "$opt" =~ ^[a-z][a-z0-9-]*$ ]] || die "${name} does not name a Privoxy option"
+    [ "$opt" != listen-address ] || die "${name}: Privoxy's listen address is set by PRIVOXY_PORT"
+    while IFS= read -r value; do
+      value=$(trim "$value")
+      if [ -n "$value" ]; then printf '%s %s\n' "$opt" "$value"; fi
+    done <<<"${!name}"
+  done < <(compgen -e | awk '/^PRIVOXY_CONF_/' | LC_ALL=C sort)
 }
 
 # Logs the effective configuration without any secret.
@@ -120,6 +157,11 @@ log_config() {
   log_info "LAN_NETWORK=${CFG_LAN_NETWORKS[*]:-<none>} NAME_SERVERS=${CFG_NAME_SERVERS[*]:-<from VPN>} VPN_DNS_FALLBACK=${CFG_DNS_FALLBACK[*]:-<none>}"
   log_info "VPN_PORT_FORWARDING=${CFG_PF_MODE} VPN_RECOVERY_TIMEOUT=${CFG_RECOVERY_TIMEOUT}s VPN_BLOCK_DOCKER_DNS=${CFG_BLOCK_DOCKER_DNS} FIREWALL_BACKEND=${CFG_FIREWALL_BACKEND}"
   log_info "PUID=${CFG_PUID} PGID=${CFG_PGID} UMASK=${CFG_UMASK} WEBUI_PORT=${CFG_WEBUI_PORT} INCOMING_PORT=${CFG_INCOMING_PORT:-<from qBittorrent.conf>}"
+  if [ "$CFG_PRIVOXY_ENABLED" = yes ]; then
+    local names
+    names=$(trim "$(printf '%s\n' "${CFG_PRIVOXY_CONF[@]}" | awk 'NF { print $1 }' | sort -u | tr '\n' ' ')")
+    log_info "PRIVOXY_ENABLED=yes PRIVOXY_PORT=${CFG_PRIVOXY_PORT} PRIVOXY_CONF_ options: ${names:-none}"
+  fi
   if [ -n "$CFG_VPN_USERNAME" ]; then log_info "VPN credentials: provided"; fi
   if [ -n "$CFG_WEBUI_USERNAME" ] || [ -n "$CFG_WEBUI_PASSWORD" ]; then log_info "WebUI credentials: provided"; fi
 }

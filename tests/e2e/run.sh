@@ -6,14 +6,15 @@
 # NAT client traffic onto wan, resolve DNS inside the tunnel and reply to
 # NAT-PMP. The image under test runs on lan only. tcpdump on the lan bridge
 # records every packet; a packet from the client that is neither VPN
-# transport to the server nor a WebUI reply fails the run as a leak.
+# transport to the server nor a WebUI or Privoxy reply fails the run as a
+# leak.
 #
-#   tests/e2e/run.sh IMAGE [wireguard|openvpn ...]
+#   tests/e2e/run.sh IMAGE [wireguard|openvpn|openvpn_no_ipv6 ...]
 set -uo pipefail
 image="${1:?usage: tests/e2e/run.sh IMAGE [scenario...]}"
 shift
 scenarios=("$@")
-[ "${#scenarios[@]}" -gt 0 ] || scenarios=(wireguard openvpn)
+[ "${#scenarios[@]}" -gt 0 ] || scenarios=(wireguard openvpn openvpn_no_ipv6)
 
 here=$(cd "$(dirname "$0")" && pwd)
 p=qbtvpn-e2e
@@ -245,9 +246,54 @@ scenario_common() {
   check "forwarded port 40123 is open on ${tun}" wait_for 30 in_client sh -c "iptables-nft -S QBTVPN_TUNNEL_IN 2>/dev/null | grep -q 'dport 40123' || iptables-legacy -S QBTVPN_TUNNEL_IN | grep -q 'dport 40123'"
 }
 
+# privoxy_checks SERVER_WAN_IP SERVER_CONTAINER TUNNEL_IP: Privoxy answers on
+# port 8118 from the lan network, sends requests through the tunnel and
+# reaches nothing else.
+privoxy_checks() {
+  local server_wan_ip="$1" server="$2" tunnel_ip="$3" proxy="http://${client_ip}:8118"
+  local -a as_privoxy=(setpriv --reuid=privoxy --regid=privoxy --init-groups --)
+  check "control: Privoxy's user resolves target.e2e through the tunnel" in_client "${as_privoxy[@]}" nslookup target.e2e
+  check_eq "control: Privoxy's user reaches the target through the tunnel" "$server_wan_ip" \
+    in_client "${as_privoxy[@]}" curl -fsS --max-time 5 http://172.31.251.10/cgi-bin/ip
+  check_eq "Privoxy's requests leave through the tunnel (target sees ${server_wan_ip})" "$server_wan_ip" \
+    probe curl -fsS --max-time 10 -x "$proxy" http://target.e2e/cgi-bin/ip
+  check "Privoxy logged the request, as PRIVOXY_CONF_DEBUG asked" \
+    sh -c "docker logs ${p}-client 2>&1 | grep -q 'privoxy: Request: target.e2e/cgi-bin/ip'"
+  check "control: the web server on the LAN answers" probe curl -fsS -o /dev/null --max-time 5 http://172.31.250.20/cgi-bin/ip
+  check "Privoxy cannot reach the LAN" fails_quickly probe curl -fsS --max-time 5 -x "$proxy" http://172.31.250.20/cgi-bin/ip
+  check "control: the WebUI answers on loopback inside the client" in_client curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:8080/
+  check "Privoxy cannot reach the client's loopback" fails_quickly probe curl -fsS --max-time 5 -x "$proxy" http://127.0.0.1:8080/
+  check "Privoxy is unreachable from the tunnel side" \
+    fails_quickly docker exec "$server" curl -fsS --max-time 5 -x "http://${tunnel_ip}:8118" http://target.e2e/cgi-bin/ip
+  check "Privoxy runs with no capabilities" \
+    test "$(caps_of privoxy | tr '\n' ' ')" = "CapEff: 0000000000000000 CapBnd: 0000000000000000 "
+  # shellcheck disable=SC2016  # expanded inside the container
+  check "Privoxy process user is privoxy" test "$(in_client sh -c 'stat -c %U /proc/$(pidof privoxy)')" = privoxy
+}
+
 fresh_start() {
   remove_containers
   docker run -d --name "${p}-target" --network "$wan" --ip 172.31.251.10 "$helper" target >/dev/null
+  docker run -d --name "${p}-lanweb" --network "$lan" --ip 172.31.250.20 "$helper" target >/dev/null
+}
+
+# start_ovpn_server NAME: starts the OpenVPN test server with $work/NAME as
+# its shared directory and puts its client configuration in
+# $work/NAME-client/openvpn. Returns 1 when the server does not start.
+start_ovpn_server() {
+  local dir="$work/$1"
+  mkdir -p "$dir" "$dir-client/openvpn" "$work/downloads"
+  chmod 0777 "$work/downloads"
+  docker create --name "${p}-ovpn" --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv4.ip_forward=1 -e ENDPOINT_NAME="${p}-ovpn" \
+    --network "$lan" --ip 172.31.250.3 -v "$dir:/shared" "$helper" ovpn >/dev/null
+  docker network connect --ip 172.31.251.3 "$wan" "${p}-ovpn"
+  docker start "${p}-ovpn" >/dev/null
+  if ! wait_for 60 test -s "$dir/client.ovpn"; then
+    fail "OpenVPN server did not start"
+    docker logs "${p}-ovpn"
+    return 1
+  fi
+  cp "$dir/client.ovpn" "$dir-client/openvpn/provider.ovpn"
 }
 
 scenario_wireguard() {
@@ -262,14 +308,17 @@ scenario_wireguard() {
   wait_for 30 test -s "$work/wg/client.conf" || { fail "WireGuard server did not start"; docker logs "${p}-wg"; return; }
   cp "$work/wg/client.conf" "$work/wg-client/wireguard/wg0.conf"
   start_capture
-  start_client "$work/wg-client" -e VPN_RECOVERY_TIMEOUT=45 -e VPN_PORT_FORWARDING=natpmp
+  start_client "$work/wg-client" -e VPN_RECOVERY_TIMEOUT=45 -e VPN_PORT_FORWARDING=natpmp \
+    -e PRIVOXY_ENABLED=yes -e $'PRIVOXY_CONF_DEBUG=1\n2'
   if ! wait_healthy 240; then fail "WireGuard client became healthy"; diagnose; return; fi
   pass "WireGuard client became healthy"
   say "qbtvpn-healthcheck: $(docker exec "${p}-client" qbtvpn-healthcheck 2>&1)"
   scenario_common wg0 172.31.251.2 10.13.0.1 172.31.250.2
+  privoxy_checks 172.31.251.2 "${p}-wg" 10.13.0.2
   say "---- qbtvpn-status"
   docker exec "${p}-client" qbtvpn-status 2>&1 | tee "$work/status.txt" | awk '{ print "  " $0 }'
   check "qbtvpn-status shows the WireGuard handshake" grep -q 'latest handshake' "$work/status.txt"
+  check "qbtvpn-status shows Privoxy listening on 8118" grep -q '^listening on port 8118 (pid [0-9]*)$' "$work/status.txt"
   check "WebUI is unreachable from the tunnel side" fails_quickly docker exec "${p}-wg" curl -s --max-time 5 http://10.13.0.2:8080/
   check_eq "the client logged no warning or error while the tunnel was up" "" client_warnings
   check_eq "the WireGuard test server logged no warning or error" "" server_warnings wg
@@ -281,6 +330,8 @@ scenario_wireguard() {
   docker exec "${p}-wg" ip link set wg0 down
   sleep 4
   check "kill switch: nothing reaches the target while the server is down" fails_quickly in_client curl -s --max-time 5 http://172.31.251.10/cgi-bin/ip
+  check "kill switch: Privoxy reaches nothing while the server is down" \
+    fails_quickly probe curl -fsS --max-time 8 -x "http://${client_ip}:8118" http://172.31.251.10/cgi-bin/ip
   docker exec "${p}-wg" ip link set wg0 up
   check "traffic resumes when the server returns" wait_for 90 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
   check "the client never restarted" test "$(docker inspect -f '{{.RestartCount}} {{.State.Status}}' "${p}-client")" = "0 running"
@@ -292,7 +343,7 @@ scenario_wireguard() {
   check "exit status is 1" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 1
   check "qBittorrent stopped before the tunnel was removed" sh -c \
     "docker logs ${p}-client 2>&1 | awk '/qbittorrent: stopped/ { q = NR } /wireguard: wg0 removed/ { w = NR } END { exit !(q && w && q < w) }'"
-  check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.2 and dst port 51820"
+  check "no packet left outside the tunnel" leak_check "(udp and dst host 172.31.250.2 and dst port 51820) or (tcp and src port 8118)"
   if [ "$fails" -gt 0 ]; then diagnose; fi
   remove_containers
 }
@@ -300,14 +351,7 @@ scenario_wireguard() {
 scenario_openvpn() {
   say "== OpenVPN"
   fresh_start
-  mkdir -p "$work/ovpn" "$work/ovpn-client/openvpn" "$work/downloads"
-  chmod 0777 "$work/downloads"
-  docker create --name "${p}-ovpn" --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv4.ip_forward=1 -e ENDPOINT_NAME="${p}-ovpn" \
-    --network "$lan" --ip 172.31.250.3 -v "$work/ovpn:/shared" "$helper" ovpn >/dev/null
-  docker network connect --ip 172.31.251.3 "$wan" "${p}-ovpn"
-  docker start "${p}-ovpn" >/dev/null
-  wait_for 60 test -s "$work/ovpn/client.ovpn" || { fail "OpenVPN server did not start"; docker logs "${p}-ovpn"; return; }
-  cp "$work/ovpn/client.ovpn" "$work/ovpn-client/openvpn/provider.ovpn"
+  start_ovpn_server ovpn || return
   start_capture
   start_client "$work/ovpn-client" -e VPN_USERNAME=e2e -e VPN_PASSWORD=e2e-vpn-pass -e VPN_RECOVERY_TIMEOUT=0 -e VPN_PORT_FORWARDING=auto
   if ! wait_healthy 240; then fail "OpenVPN client became healthy"; diagnose; return; fi
@@ -325,6 +369,9 @@ scenario_openvpn() {
   docker exec "${p}-client" qbtvpn-status 2>&1 | tee "$work/status.txt" | awk '{ print "  " $0 }'
   check_eq "qbtvpn-status shows the OpenVPN tunnel" "openvpn: CONNECTED 10.14.0.2 server 172.31.250.3" \
     grep '^openvpn:' "$work/status.txt"
+  check "Privoxy is off by default" \
+    fails_quickly probe curl -fsS --max-time 5 -x "http://${client_ip}:8118" http://target.e2e/cgi-bin/ip
+  check_eq "qbtvpn-status has no Privoxy section by default" "" grep '^== privoxy' "$work/status.txt"
   check_eq "the client logged no warning or error while the tunnel was up" "" client_warnings
   check_eq "the OpenVPN test server logged no warning or error" "" server_warnings ovpn
 
@@ -343,6 +390,34 @@ scenario_openvpn() {
   check "docker stop exits cleanly" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 0
   check "qBittorrent stopped before OpenVPN" sh -c \
     "docker logs ${p}-client 2>&1 | awk '/qbittorrent: stopped/ { q = NR } /openvpn: stopped/ { o = NR } END { exit !(q && o && q < o) }'"
+  check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.3 and dst port 1194"
+  if [ "$fails" -gt 0 ]; then diagnose; fi
+  remove_containers
+}
+
+# The server pushes an IPv6 address and routes to a client whose container
+# has IPv6 switched off.
+scenario_openvpn_no_ipv6() {
+  say "== OpenVPN with IPv6 disabled in the container"
+  fresh_start
+  start_ovpn_server ovpn-no-ipv6 || return
+  start_capture
+  start_client "$work/ovpn-no-ipv6-client" -e VPN_USERNAME=e2e -e VPN_PASSWORD=e2e-vpn-pass -e VPN_RECOVERY_TIMEOUT=0 \
+    --sysctl net.ipv6.conf.all.disable_ipv6=1
+  if ! wait_healthy 240; then fail "OpenVPN client with IPv6 disabled became healthy"; diagnose; return; fi
+  pass "OpenVPN client with IPv6 disabled became healthy"
+  check_eq "IPv6 is disabled in the client" 1 in_client cat /proc/sys/net/ipv6/conf/default/disable_ipv6
+  check_eq "egress goes through the tunnel (target sees 172.31.251.3)" 172.31.251.3 \
+    in_client curl -fsS --max-time 10 http://target.e2e/cgi-bin/ip
+  check "the client logged that it ignores the server's IPv6" \
+    sh -c "docker logs ${p}-client 2>&1 | grep -q 'openvpn: IPv6 is disabled in this container'"
+  check_eq "tun0 has no IPv6 address" "" in_client ip -6 -o addr show dev tun0
+  check_eq "qbtvpn-status shows the OpenVPN tunnel" "openvpn: CONNECTED 10.14.0.2 server 172.31.250.3" \
+    sh -c "docker exec ${p}-client qbtvpn-status 2>&1 | grep '^openvpn:'"
+  check_eq "the client logged no warning or error" "" client_warnings
+  check_eq "the OpenVPN test server logged no warning or error" "" server_warnings ovpn
+  docker stop -t 60 "${p}-client" >/dev/null
+  check "docker stop exits cleanly" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 0
   check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.3 and dst port 1194"
   if [ "$fails" -gt 0 ]; then diagnose; fi
   remove_containers
