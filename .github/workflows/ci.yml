@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck
+        run: |
+          curl -fsSL -o /tmp/shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          /tmp/shellcheck-v0.11.0/shellcheck -x -s bash -e SC1091 \
+            build/*.sh rootfs/usr/local/lib/qbtvpn/*.sh rootfs/usr/local/lib/qbtvpn/openvpn-hook \
+            rootfs/usr/local/bin/* tests/run.sh tests/lib/*.sh tests/unit/*.sh \
+            tests/e2e/run.sh tests/e2e/server/entrypoint.sh tests/e2e/server/ovpn-check-user
+      - name: hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+
+  build-and-test:
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Resolve qBittorrent and libtorrent versions
+        id: versions
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash build/resolve-versions.sh | tee -a "$GITHUB_OUTPUT"
+      - name: Resolve the Qt version for this architecture
+        id: qt
+        run: bash build/resolve-qt.sh | tee -a "$GITHUB_OUTPUT"
+      - name: Build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: qbittorrentvpn:ci
+          build-args: |
+            QBITTORRENT_VERSION=${{ steps.versions.outputs.QBITTORRENT_VERSION }}
+            LIBTORRENT_VERSION=${{ steps.versions.outputs.LIBTORRENT_VERSION }}
+            QT_VERSION=${{ steps.qt.outputs.QT_VERSION }}
+            IMAGE_VERSION=ci
+            IMAGE_REVISION=${{ github.sha }}
+          secrets: |
+            github_token=${{ secrets.GITHUB_TOKEN }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - name: Unit tests
+        run: bash tests/run.sh unit qbittorrentvpn:ci
+      - name: End-to-end tunnel and leak tests
+        run: bash tests/run.sh e2e qbittorrentvpn:ci

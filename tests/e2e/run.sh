@@ -1,0 +1,364 @@
+#!/bin/bash
+# End-to-end tests on a Docker host.
+#
+# A test double (tests/e2e/server) plays the VPN provider and the internet:
+# WireGuard and OpenVPN servers sit on a "lan" network and a "wan" network,
+# NAT client traffic onto wan, resolve DNS inside the tunnel and reply to
+# NAT-PMP. The image under test runs on lan only. tcpdump on the lan bridge
+# records every packet; a packet from the client that is neither VPN
+# transport to the server nor a WebUI reply fails the run as a leak.
+#
+#   tests/e2e/run.sh IMAGE [wireguard|openvpn ...]
+set -uo pipefail
+image="${1:?usage: tests/e2e/run.sh IMAGE [scenario...]}"
+shift
+scenarios=("$@")
+[ "${#scenarios[@]}" -gt 0 ] || scenarios=(wireguard openvpn)
+
+here=$(cd "$(dirname "$0")" && pwd)
+p=qbtvpn-e2e
+lan="${p}-lan"
+wan="${p}-wan"
+helper="${p}-server"
+client_ip=172.31.250.10
+work=$(mktemp -d "${TMPDIR:-/tmp}/qbtvpn-e2e.XXXXXX")
+fails=0
+passes=0
+
+say() { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*"; }
+pass() { passes=$((passes + 1)); say "PASS $*"; }
+fail() { fails=$((fails + 1)); say "FAIL $*"; }
+check() {
+  local name="$1"
+  shift
+  if "$@"; then pass "$name"; else fail "$name"; fi
+}
+
+# check_eq NAME WANT CMD...: passes when CMD prints exactly WANT; a failure
+# shows what it printed and the start of its stderr.
+check_eq() {
+  local name="$1" want="$2" got
+  shift 2
+  got=$("$@" 2>"$work/check.err")
+  if [ "$got" = "$want" ]; then pass "$name"; return; fi
+  fail "${name}: got '${got}' $(tr '\n' ' ' <"$work/check.err")"
+}
+
+# check_eq_within NAME SECONDS WANT CMD...: check_eq, rerunning CMD once a
+# second until it prints WANT or SECONDS have passed.
+check_eq_within() {
+  local name="$1" deadline=$(($(date +%s) + $2)) want="$3" got
+  shift 3
+  while :; do
+    got=$("$@" 2>"$work/check.err")
+    if [ "$got" = "$want" ]; then pass "$name"; return; fi
+    [ "$(date +%s)" -lt "$deadline" ] || break
+    sleep 1
+  done
+  fail "${name}: got '${got}' $(tr '\n' ' ' <"$work/check.err")"
+}
+in_client() { docker exec "${p}-client" "$@"; }
+# probe CMD ARGS...: runs CMD in a throwaway container on the lan network.
+probe() {
+  local cmd="$1"
+  shift
+  docker run --rm --network "$lan" --entrypoint "$cmd" "$helper" "$@"
+}
+
+remove_containers() {
+  local ids
+  ids=$(docker ps -aq --filter "name=^${p}-" | tr '\n' ' ')
+  if [ -n "$ids" ]; then
+    # shellcheck disable=SC2086
+    docker rm -f $ids >/dev/null
+  fi
+}
+
+cleanup() {
+  remove_containers
+  docker network rm "$lan" "$wan" >/dev/null 2>&1
+  docker run --rm -v "$work:/w" --entrypoint /bin/sh "$helper" -c 'rm -rf /w/*' >/dev/null 2>&1
+  rmdir "$work" 2>/dev/null
+  return 0
+}
+trap cleanup EXIT
+
+diagnose() {
+  local s
+  for s in wg ovpn; do
+    if docker inspect "${p}-${s}" >/dev/null 2>&1; then
+      say "---- ${s} server log"
+      docker logs "${p}-${s}" 2>&1 | awk '{ print "  " $0 }'
+    fi
+  done
+  say "---- client log"
+  docker logs "${p}-client" 2>&1 | awk '{ print "  " $0 }'
+  say "---- client status"
+  docker exec "${p}-client" qbtvpn-status 2>&1 | awk '{ print "  " $0 }'
+}
+
+# wait_healthy SECONDS: waits for the client's health check to pass, printing
+# its last result once a minute.
+wait_healthy() {
+  local start deadline next state health
+  start=$(date +%s)
+  deadline=$((start + $1))
+  next=$((start + 60))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    state=$(docker inspect -f '{{.State.Status}}' "${p}-client" 2>&1)
+    if [ "$state" != running ]; then
+      say "client is ${state:-gone}"
+      return 1
+    fi
+    if health=$(docker exec "${p}-client" qbtvpn-healthcheck 2>&1); then
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$next" ]; then
+      say "waiting for a healthy client after $(($(date +%s) - start)) s: ${health}"
+      next=$((next + 60))
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# wait_for SECONDS CMD...: reruns CMD once a second until it succeeds or
+# SECONDS have passed on the clock, printing once a minute what CMD last
+# printed.
+wait_for() {
+  local start deadline next out
+  start=$(date +%s)
+  deadline=$((start + $1))
+  next=$((start + 60))
+  shift
+  while :; do
+    if out=$("$@" 2>&1); then return 0; fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    if [ "$(date +%s)" -ge "$next" ]; then
+      say "still waiting after $(($(date +%s) - start)) s: $* (last output: $(tail -n 1 <<<"$out"))"
+      next=$((next + 60))
+    fi
+    sleep 1
+  done
+}
+
+fails_quickly() { ! timeout 12 "$@" >/dev/null 2>&1; }
+
+webui_code() { probe curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${client_ip}:8080/"; }
+
+# webui_login USER PASSWORD: prints accepted, refused, or the WebAPI's reply
+# when it is neither. qBittorrent 5.3 replies 204 or 401; earlier releases
+# reply 200 with "Ok." or "Fails.".
+webui_login() {
+  local reply code body
+  reply=$(probe curl -s -w '\n%{http_code}' --max-time 5 --data-urlencode "username=$1" --data-urlencode "password=$2" \
+    -H "Referer: http://${client_ip}:8080" "http://${client_ip}:8080/api/v2/auth/login")
+  code="${reply##*$'\n'}"
+  body="${reply%$'\n'*}"
+  case "${code} ${body}" in
+    "204 " | "200 Ok.") echo accepted ;;
+    "401 "* | "200 Fails.") echo refused ;;
+    *) echo "HTTP ${code} ${body}" ;;
+  esac
+}
+
+# qbt_pref KEY: prints a qBittorrent preference through the WebAPI.
+qbt_pref() {
+  probe sh -c "curl -s -c /tmp/j --max-time 5 --data 'username=admin&password=e2e-webui-pass' -H 'Referer: http://${client_ip}:8080' http://${client_ip}:8080/api/v2/auth/login >/dev/null && curl -s -b /tmp/j --max-time 5 http://${client_ip}:8080/api/v2/app/preferences" |
+    awk -v k="\"$1\":" '{ i = index($0, k); if (i) { s = substr($0, i + length(k)); sub(/[,}].*/, "", s); gsub(/"/, "", s); print s } }'
+}
+
+caps_of() { in_client sh -c "awk '/^Cap(Eff|Bnd)/ { print \$1, \$2 }' /proc/\$(pidof $1 | awk '{ print \$1 }')/status"; }
+
+start_capture() {
+  local bridge
+  bridge="br-$(docker network inspect -f '{{.Id}}' "$lan" | cut -c1-12)"
+  mkdir -p "$work/cap"
+  docker run -d --name "${p}-capture" --network host --cap-add NET_RAW --cap-add NET_ADMIN \
+    -v "$work/cap:/shared" "$helper" capture "$bridge" >/dev/null
+  sleep 2
+}
+
+# leak_check TRANSPORT_FILTER: fails when the capture holds a packet from the
+# client that is not VPN transport, a WebUI reply, ARP, or IPv6 link-local
+# housekeeping from before the firewall started.
+leak_check() {
+  local transport="$1" mac leaks
+  docker stop -t 5 "${p}-capture" >/dev/null
+  mac=$(docker inspect -f "{{(index .NetworkSettings.Networks \"${lan}\").MacAddress}}" "${p}-client" 2>/dev/null)
+  leaks=$(docker run --rm -v "$work/cap:/shared" --entrypoint tcpdump "$helper" -r /shared/lan.pcap -n \
+    "(src host ${client_ip} and not arp and not (${transport}) and not (tcp and src port 8080)) or (ether src ${mac} and ip6 and not src net fe80::/10 and not src host :: and not dst net ff02::/16)" 2>/dev/null)
+  if [ -n "$leaks" ]; then
+    printf '%s\n' "$leaks" | awk '{ print "  leaked: " $0 }'
+    return 1
+  fi
+  say "capture: $(docker run --rm -v "$work/cap:/shared" --entrypoint tcpdump "$helper" -r /shared/lan.pcap -n "src host ${client_ip}" 2>/dev/null | wc -l) packets from the client, all VPN transport or WebUI replies"
+}
+
+# client_warnings: prints every warning or error line in the client's log.
+client_warnings() {
+  docker logs "${p}-client" 2>&1 | grep -E '\[(warn|error)\]|WARNING|DEPRECATED|ERROR'
+}
+
+# server_warnings ROLE: prints every warning or error line in a test server's log.
+server_warnings() {
+  docker logs "${p}-$1" 2>&1 | grep -Ei 'warning|error|deprecated'
+}
+
+start_client() {
+  local cfg="$1"
+  shift
+  docker run -d --name "${p}-client" --cap-add NET_ADMIN --device /dev/net/tun \
+    --network "$lan" --ip "$client_ip" --dns-search e2e.invalid -v "$cfg:/config" -v "$work/downloads:/downloads" \
+    -e LAN_NETWORK=172.31.250.0/24 -e VPN_CHECK_INTERVAL=3 -e VPN_CONNECT_TIMEOUT=60 \
+    -e WEBUI_USERNAME=admin -e WEBUI_PASSWORD=e2e-webui-pass \
+    -e QBT_CONF_BitTorrent__Session__MaxConnections=123 \
+    "$@" "$image" >/dev/null
+}
+
+# scenario_common TUN SERVER_WAN_IP TUNNEL_DNS SERVER_LAN_IP: the checks both
+# scenarios share. Each blocked-traffic check has a control showing that the
+# same request gets an answer from a container without the firewall.
+scenario_common() {
+  local tun="$1" server_wan_ip="$2" tunnel_dns="$3" server_lan_ip="$4"
+  check_eq "egress goes through the tunnel (target sees ${server_wan_ip})" "$server_wan_ip" \
+    in_client curl -fsS --max-time 10 http://target.e2e/cgi-bin/ip
+  check "resolv.conf points at the tunnel DNS ${tunnel_dns}" in_client grep -q "nameserver ${tunnel_dns}" /etc/resolv.conf
+  check "control: Docker's DNS answers for ${p}-client" probe nslookup -type=a "${p}-client." 127.0.0.11
+  check "DNS to Docker's 127.0.0.11 is blocked" fails_quickly in_client nslookup -type=a "${p}-client." 127.0.0.11
+  check "control: the resolver on the LAN at ${server_lan_ip} answers" probe nslookup -type=a target.e2e "$server_lan_ip"
+  check "DNS to the resolver on the LAN is blocked" fails_quickly in_client nslookup -type=a target.e2e "$server_lan_ip"
+  check "control: 1.1.1.1 answers through the LAN gateway" probe curl -s -o /dev/null --max-time 5 http://1.1.1.1/
+  check "traffic forced out eth0 is blocked" fails_quickly in_client curl -s --interface eth0 --max-time 5 http://1.1.1.1/
+  check "control: the LAN gateway answers IPv6" probe ping -6 -c 1 -W 2 fd00:250::1
+  check "IPv6 to the LAN is blocked" fails_quickly in_client ping -6 -c 1 -W 2 fd00:250::1
+  check_eq "WebUI is reachable from the LAN" 200 webui_code
+  check_eq "WebUI login works with WEBUI_PASSWORD" accepted webui_login admin e2e-webui-pass
+  check_eq "WebUI login refuses a wrong password" refused webui_login admin wrong
+  check_eq "qBittorrent is bound to ${tun}" "$tun" qbt_pref current_network_interface
+  check_eq "QBT_CONF_ passthrough reached qBittorrent" 123 qbt_pref max_connec
+  check "qBittorrent runs as 99 with no capabilities" \
+    test "$(caps_of qbittorrent-nox | tr '\n' ' ')" = "CapEff: 0000000000000000 CapBnd: 0000000000000000 "
+  # shellcheck disable=SC2016  # expanded inside the container
+  check "qBittorrent process user is 99" test "$(in_client sh -c 'stat -c %u /proc/$(pidof qbittorrent-nox)')" = 99
+  check_eq_within "forwarded port 40123 reached qBittorrent" 60 40123 qbt_pref listen_port
+  check "forwarded port 40123 is open on ${tun}" wait_for 30 in_client sh -c "iptables-nft -S QBTVPN_TUNNEL_IN 2>/dev/null | grep -q 'dport 40123' || iptables-legacy -S QBTVPN_TUNNEL_IN | grep -q 'dport 40123'"
+}
+
+fresh_start() {
+  remove_containers
+  docker run -d --name "${p}-target" --network "$wan" --ip 172.31.251.10 "$helper" target >/dev/null
+}
+
+scenario_wireguard() {
+  say "== WireGuard"
+  fresh_start
+  mkdir -p "$work/wg" "$work/wg-client/wireguard" "$work/downloads"
+  chmod 0777 "$work/downloads"
+  docker create --name "${p}-wg" --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1 -e ENDPOINT_NAME="${p}-wg" \
+    --network "$lan" --ip 172.31.250.2 -v "$work/wg:/shared" "$helper" wg >/dev/null
+  docker network connect --ip 172.31.251.2 "$wan" "${p}-wg"
+  docker start "${p}-wg" >/dev/null
+  wait_for 30 test -s "$work/wg/client.conf" || { fail "WireGuard server did not start"; docker logs "${p}-wg"; return; }
+  cp "$work/wg/client.conf" "$work/wg-client/wireguard/wg0.conf"
+  start_capture
+  start_client "$work/wg-client" -e VPN_RECOVERY_TIMEOUT=45 -e VPN_PORT_FORWARDING=natpmp
+  if ! wait_healthy 240; then fail "WireGuard client became healthy"; diagnose; return; fi
+  pass "WireGuard client became healthy"
+  say "qbtvpn-healthcheck: $(docker exec "${p}-client" qbtvpn-healthcheck 2>&1)"
+  scenario_common wg0 172.31.251.2 10.13.0.1 172.31.250.2
+  say "---- qbtvpn-status"
+  docker exec "${p}-client" qbtvpn-status 2>&1 | tee "$work/status.txt" | awk '{ print "  " $0 }'
+  check "qbtvpn-status shows the WireGuard handshake" grep -q 'latest handshake' "$work/status.txt"
+  check "WebUI is unreachable from the tunnel side" fails_quickly docker exec "${p}-wg" curl -s --max-time 5 http://10.13.0.2:8080/
+  check_eq "the client logged no warning or error while the tunnel was up" "" client_warnings
+  check_eq "the WireGuard test server logged no warning or error" "" server_warnings wg
+
+  check "kill switch: with wg0 deleted, traffic falls back to eth0 and is refused" \
+    fails_quickly in_client sh -c 'ip link del dev wg0 && curl -s --max-time 4 http://172.31.251.10/cgi-bin/ip'
+  check "recreates wg0 in place and traffic flows again" wait_for 90 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
+
+  docker exec "${p}-wg" ip link set wg0 down
+  sleep 4
+  check "kill switch: nothing reaches the target while the server is down" fails_quickly in_client curl -s --max-time 5 http://172.31.251.10/cgi-bin/ip
+  docker exec "${p}-wg" ip link set wg0 up
+  check "traffic resumes when the server returns" wait_for 90 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
+  check "the client never restarted" test "$(docker inspect -f '{{.RestartCount}} {{.State.Status}}' "${p}-client")" = "0 running"
+
+  docker exec "${p}-wg" ip link set wg0 down
+  check "health turns unhealthy once the handshake is older than 180 s" \
+    wait_for 260 in_client grep -q '^unhealthy .*handshake' /run/qbtvpn/state/health
+  check "exits after VPN_RECOVERY_TIMEOUT" wait_for 120 sh -c "docker inspect -f '{{.State.Status}}' ${p}-client | grep -qx exited"
+  check "exit status is 1" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 1
+  check "qBittorrent stopped before the tunnel was removed" sh -c \
+    "docker logs ${p}-client 2>&1 | awk '/qbittorrent: stopped/ { q = NR } /wireguard: wg0 removed/ { w = NR } END { exit !(q && w && q < w) }'"
+  check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.2 and dst port 51820"
+  if [ "$fails" -gt 0 ]; then diagnose; fi
+  remove_containers
+}
+
+scenario_openvpn() {
+  say "== OpenVPN"
+  fresh_start
+  mkdir -p "$work/ovpn" "$work/ovpn-client/openvpn" "$work/downloads"
+  chmod 0777 "$work/downloads"
+  docker create --name "${p}-ovpn" --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv4.ip_forward=1 -e ENDPOINT_NAME="${p}-ovpn" \
+    --network "$lan" --ip 172.31.250.3 -v "$work/ovpn:/shared" "$helper" ovpn >/dev/null
+  docker network connect --ip 172.31.251.3 "$wan" "${p}-ovpn"
+  docker start "${p}-ovpn" >/dev/null
+  wait_for 60 test -s "$work/ovpn/client.ovpn" || { fail "OpenVPN server did not start"; docker logs "${p}-ovpn"; return; }
+  cp "$work/ovpn/client.ovpn" "$work/ovpn-client/openvpn/provider.ovpn"
+  start_capture
+  start_client "$work/ovpn-client" -e VPN_USERNAME=e2e -e VPN_PASSWORD=e2e-vpn-pass -e VPN_RECOVERY_TIMEOUT=0 -e VPN_PORT_FORWARDING=auto
+  if ! wait_healthy 240; then fail "OpenVPN client became healthy"; diagnose; return; fi
+  pass "OpenVPN client became healthy"
+  say "qbtvpn-healthcheck: $(docker exec "${p}-client" qbtvpn-healthcheck 2>&1)"
+  scenario_common tun0 172.31.251.3 10.14.0.1 172.31.250.3
+  # shellcheck disable=SC2016  # expanded inside the container
+  check "OpenVPN runs as the vpn user" test "$(in_client sh -c 'stat -c %U /proc/$(pidof openvpn)')" = vpn
+  check "OpenVPN holds only CAP_NET_ADMIN" \
+    test "$(caps_of openvpn | tr '\n' ' ')" = "CapEff: 0000000000001000 CapBnd: 0000000000001000 "
+  check "IPv6 the server assigns goes through the tunnel" in_client ping -6 -c 1 -W 3 fd00:14::1
+  check_eq "global IPv6 is routed into tun0" "2000::/4 dev tun0" \
+    sh -c "docker exec ${p}-client ip -6 route show 2000::/4 | awk '{ print \$1, \$2, \$3 }'"
+  say "---- qbtvpn-status"
+  docker exec "${p}-client" qbtvpn-status 2>&1 | tee "$work/status.txt" | awk '{ print "  " $0 }'
+  check_eq "qbtvpn-status shows the OpenVPN tunnel" "openvpn: CONNECTED 10.14.0.2 server 172.31.250.3" \
+    grep '^openvpn:' "$work/status.txt"
+  check_eq "the client logged no warning or error while the tunnel was up" "" client_warnings
+  check_eq "the OpenVPN test server logged no warning or error" "" server_warnings ovpn
+
+  check "kill switch: with OpenVPN killed, traffic falls back to eth0 and is refused" \
+    fails_quickly in_client sh -c 'pkill -KILL -x openvpn; sleep 1; curl -s --max-time 4 http://172.31.251.10/cgi-bin/ip'
+  check "restarts OpenVPN in place and traffic flows again" wait_for 120 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
+
+  docker exec "${p}-ovpn" pkill -x openvpn
+  sleep 5
+  check "kill switch: nothing reaches the target while the server is down" fails_quickly in_client curl -s --max-time 5 http://172.31.251.10/cgi-bin/ip
+  docker exec -d "${p}-ovpn" openvpn --config /pki/server.conf
+  check "recovers in place when the server returns" wait_for 120 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
+  check "the client never restarted" test "$(docker inspect -f '{{.RestartCount}} {{.State.Status}}' "${p}-client")" = "0 running"
+
+  docker stop -t 60 "${p}-client" >/dev/null
+  check "docker stop exits cleanly" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 0
+  check "qBittorrent stopped before OpenVPN" sh -c \
+    "docker logs ${p}-client 2>&1 | awk '/qbittorrent: stopped/ { q = NR } /openvpn: stopped/ { o = NR } END { exit !(q && o && q < o) }'"
+  check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.3 and dst port 1194"
+  if [ "$fails" -gt 0 ]; then diagnose; fi
+  remove_containers
+}
+
+say "building the test double"
+docker build -q -t "$helper" "$here/server" >/dev/null || { echo "could not build the test double"; exit 1; }
+cleanup
+work=$(mktemp -d "${TMPDIR:-/tmp}/qbtvpn-e2e.XXXXXX")
+docker network create --driver bridge --subnet 172.31.250.0/24 --gateway 172.31.250.1 \
+  --ipv6 --subnet fd00:250::/64 "$lan" >/dev/null || { echo "could not create the lan network"; exit 1; }
+docker network create --driver bridge --internal --subnet 172.31.251.0/24 "$wan" >/dev/null
+
+for s in "${scenarios[@]}"; do
+  "scenario_${s}"
+done
+
+say "${passes} passed, ${fails} failed"
+[ "$fails" -eq 0 ]

@@ -1,0 +1,5 @@
+#!/bin/sh
+# OpenVPN auth-user-pass-verify (via-file): accepts only e2e / e2e-vpn-pass.
+user=$(sed -n 1p "$1")
+pass=$(sed -n 2p "$1")
+[ "$user" = e2e ] && [ "$pass" = e2e-vpn-pass ]

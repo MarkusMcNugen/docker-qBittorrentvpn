@@ -1,0 +1,53 @@
+#!/bin/bash
+# OpenVPN script hook for --up, --route-up, --down and --tls-verify. Runs as
+# the vpn user and writes state files in QBTVPN_OVPN_STATE, which the
+# entrypoint reads; it changes nothing else.
+#
+#   dns        DNS servers the server pushed, one per line
+#   gateway    route_vpn_gateway, the tunnel's gateway address
+#   local      the tunnel address assigned to this client
+#   up         epoch seconds of the last up or route-up
+#   down       epoch seconds of the last down
+#   server-cn  common name of the server certificate (tls-verify, depth 0)
+set -u
+state="${QBTVPN_OVPN_STATE:?QBTVPN_OVPN_STATE is not set}"
+umask 077
+
+put() {
+  printf '%s\n' "$2" >"$state/$1.tmp" && mv -f "$state/$1.tmp" "$state/$1"
+}
+
+case "${script_type:-}" in
+  up | route-up)
+    servers=()
+    i=1
+    while :; do
+      var="foreign_option_${i}"
+      val="${!var-}"
+      [ -n "$val" ] || break
+      case "$val" in
+        "dhcp-option DNS "*) servers+=("${val#dhcp-option DNS }") ;;
+        "dhcp-option DNS6 "*) servers+=("${val#dhcp-option DNS6 }") ;;
+      esac
+      i=$((i + 1))
+    done
+    while read -r var; do
+      case "$var" in
+        dns_server_*_address_*) servers+=("${!var}") ;;
+      esac
+    done < <(compgen -v dns_server_)
+    put dns "$(printf '%s\n' "${servers[@]}" | awk 'NF && !seen[$0]++')"
+    put gateway "${route_vpn_gateway:-}"
+    put local "${ifconfig_local:-}"
+    put up "$(date +%s)"
+    ;;
+  down)
+    put down "$(date +%s)"
+    ;;
+  tls-verify)
+    if [ "${1:-}" = 0 ]; then
+      put server-cn "${X509_0_CN:-}"
+    fi
+    ;;
+esac
+exit 0

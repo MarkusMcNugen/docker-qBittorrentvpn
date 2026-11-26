@@ -1,0 +1,10 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.conf text eol=lf
+*.awk text eol=lf
+*.asc text eol=lf
+*.crt text eol=lf
+Dockerfile text eol=lf
+rootfs/usr/local/bin/* text eol=lf
+rootfs/usr/local/lib/qbtvpn/* text eol=lf
+*.png binary

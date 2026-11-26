@@ -1,126 +1,193 @@
-[preview]: https://raw.githubusercontent.com/MarkusMcNugen/docker-templates/master/qbittorrentvpn/Screenshot.png "qBittorrent Preview"
+<div align="center">
 
-# qBittorrent with WebUI and OpenVPN
-Docker container which runs the latest headless qBittorrent client with WebUI while connecting to OpenVPN with iptables killswitch to prevent IP leakage when the tunnel goes down.
+# qBittorrent VPN
 
-![alt text][preview]
+**qBittorrent built from source, reachable only through an OpenVPN or WireGuard tunnel.**
 
-## Docker Features
-* Base: Ubuntu 20.04
-* Always builds latest qBittorrent client
-* Size: 300MB
-* Selectively enable or disable OpenVPN support
-* IP tables kill switch to prevent IP leaking when VPN connection fails
-* Specify name servers to add to container
-* Configure UID, GID, and UMASK for config files and downloads by qBittorrent
-* WebUI\CSRFProtection set to false by default for Unraid users
+[![Docker Pulls](https://img.shields.io/docker/pulls/markusmcnugen/qbittorrentvpn?style=flat-square)](https://hub.docker.com/r/markusmcnugen/qbittorrentvpn)
+[![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-blue.svg?style=flat-square)](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-informational?style=flat-square)](#platforms)
 
-# Run container from Docker registry
-The container is available from the Docker registry and this is the simplest way to get it.
-To run the container use this command:
+**[Documentation](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/README.md)** | [Configuration reference](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Configuration.md) | [Changelog](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/CHANGELOG.md)
 
-```
-$ docker run --privileged  -d \
-              -v /your/config/path/:/config \
-              -v /your/downloads/path/:/downloads \
-              -e "VPN_ENABLED=yes" \
-              -e "LAN_NETWORK=192.168.1.0/24" \
-              -e "NAME_SERVERS=8.8.8.8,8.8.4.4" \
-              -p 8080:8080 \
-              -p 8999:8999 \
-              -p 8999:8999/udp \
-              markusmcnugen/qbittorrentvpn
-```
+The image compiles the newest qBittorrent and libtorrent releases from signed source, then runs qBittorrent behind a firewall that is closed before the VPN starts and stays closed if the VPN drops. Torrent traffic, DNS lookups and IPv6 have no way out except the tunnel.
 
-# Variables, Volumes, and Ports
-## Environment Variables
-| Variable | Required | Function | Example |
-|----------|----------|----------|----------|
-|`VPN_ENABLED`| Yes | Enable VPN? (yes/no) Default:yes|`VPN_ENABLED=yes`|
-|`VPN_USERNAME`| No | If username and password provided, configures ovpn file automatically |`VPN_USERNAME=ad8f64c02a2de`|
-|`VPN_PASSWORD`| No | If username and password provided, configures ovpn file automatically |`VPN_PASSWORD=ac98df79ed7fb`|
-|`LAN_NETWORK`| Yes | Local Network with CIDR notation |`LAN_NETWORK=192.168.1.0/24`|
-|`NAME_SERVERS`| No | Comma delimited name servers |`NAME_SERVERS=8.8.8.8,8.8.4.4`|
-|`PUID`| No | UID applied to config files and downloads |`PUID=99`|
-|`PGID`| No | GID applied to config files and downloads |`PGID=100`|
-|`UMASK`| No | GID applied to config files and downloads |`UMASK=002`|
-|`WEBUI_PORT_ENV`| No | Applies WebUI port to qBittorrents config at boot (Must change exposed ports to match)  |`WEBUI_PORT_ENV=8080`|
-|`INCOMING_PORT_ENV`| No | Applies Incoming port to qBittorrents config at boot (Must change exposed ports to match) |`INCOMING_PORT_ENV=8999`|
+</div>
 
-## Volumes
-| Volume | Required | Function | Example |
-|----------|----------|----------|----------|
-| `config` | Yes | qBittorrent and OpenVPN config files | `/your/config/path/:/config`|
-| `downloads` | No | Default download path for torrents | `/your/downloads/path/:/downloads`|
+---
 
-## Ports
-| Port | Proto | Required | Function | Example |
-|----------|----------|----------|----------|----------|
-| `8080` | TCP | Yes | qBittorrent WebUI | `8080:8080`|
-| `8999` | TCP | Yes | qBittorrent listening port | `8999:8999`|
-| `8999` | UDP | Yes | qBittorrent listening port | `8999:8999/udp`|
+<details>
+<summary><b>Table of contents</b></summary>
 
-# Access the WebUI
-Access http://IPADDRESS:PORT from a browser on the same network.
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Why this image](#why-this-image)
+- [How the kill switch works](#how-the-kill-switch-works)
+- [Configuration](#configuration)
+- [Port forwarding](#port-forwarding)
+- [Upgrading from 1.x](#upgrading-from-1x)
+- [Repository layout](#repository-layout)
+- [Building and testing](#building-and-testing)
+- [Platforms](#platforms)
+- [Documentation](#documentation)
+- [License](#license)
 
-## Default Credentials
-| Credential | Default Value |
-|----------|----------|
-|`WebUI Username`| admin |
-|`WebUI Password`| adminadmin |
+</details>
 
-## Origin header & Target origin mismatch
-WebUI\CSRFProtection must be set to false in qBittorrent.conf if using an unconfigured reverse proxy or forward request within a browser. This is the default setting unless changed. This file can be found in the dockers config directory in /qBittorrent/config
+---
 
-## WebUI: Invalid Host header, port mismatch
-qBittorrent throws a [WebUI: Invalid Host header, port mismatch](https://github.com/qbittorrent/qBittorrent/issues/7641#issuecomment-339370794) error if you use port forwarding with bridge networking due to security features to prevent DNS rebinding attacks. If you need to run qBittorrent on different ports, instead edit the WEBUI_PORT_ENV and/or INCOMING_PORT_ENV variables AND the exposed ports to change the native ports qBittorrent uses.
+## Features
 
-# How to use OpenVPN
-The container will fail to boot if `VPN_ENABLED` is set to yes or empty and a .ovpn is not present in the /config/openvpn directory. Drop a .ovpn file from your VPN provider into /config/openvpn and start the container again. You may need to edit the ovpn configuration file to load your VPN credentials from a file by setting `auth-user-pass`.
+<details open>
+<summary>What the image does</summary>
 
-**Note:** The script will use the first ovpn file it finds in the /config/openvpn directory. Adding multiple ovpn files will not start multiple VPN connections.
+- qBittorrent and libtorrent built from source on Alpine Linux for every release, the qBittorrent tarball checked against its OpenPGP signature
+- A new image published automatically when qBittorrent or libtorrent releases, and rebuilt weekly for Alpine security fixes
+- OpenVPN 2.7 and WireGuard, with a userspace WireGuard fallback for kernels without the module
+- A fail-closed IPv4 and IPv6 firewall that pins each VPN server to its resolved address ([how it works](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Kill-Switch.md))
+- DNS only through the tunnel, with Docker's own resolver blocked
+- qBittorrent bound to the tunnel interface and run as PUID:PGID with no Linux capabilities; OpenVPN runs as its own user with only `CAP_NET_ADMIN`
+- The tunnel recovers in place while qBittorrent keeps running; a tunnel down longer than `VPN_RECOVERY_TIMEOUT` restarts the container
+- Port forwarding for ProtonVPN and other NAT-PMP providers, Private Internet Access, and fixed ports ([setup](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Port-Forwarding.md))
+- WebUI username and password from environment variables or Docker secrets
+- Any qBittorrent setting from an environment variable through `QBT_CONF_*`
+- Existing 1.x setups keep working: same folders, same variables
 
-## Example auth-user-pass option
-`auth-user-pass credentials.conf`
+</details>
 
-## Example credentials.conf
-```
-username
-password
+## Quick start
+
+Put your provider's OpenVPN file in `./config/openvpn/` (or its WireGuard file in `./config/wireguard/`), then:
+
+```yaml
+services:
+  qbittorrentvpn:
+    image: markusmcnugen/qbittorrentvpn:latest
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      LAN_NETWORK: 192.168.1.0/24
+      VPN_USERNAME: your-vpn-username
+      VPN_PASSWORD: your-vpn-password
+      PUID: "99"
+      PGID: "100"
+    volumes:
+      - ./config:/config
+      - ./downloads:/downloads
+    ports:
+      - 8080:8080
+    restart: unless-stopped
+    stop_grace_period: 150s
 ```
 
-## PUID/PGID
-User ID (PUID) and Group ID (PGID) can be found by issuing the following command for the user you want to run the container as:
-
-```
-id <username>
+```bash
+docker compose up -d
+docker logs -f qbittorrentvpn
 ```
 
-# Issues
-If you are having issues with this container please submit an issue on GitHub.
-Please provide logs, docker version and other information that can simplify reproducing the issue.
-Using the latest stable verison of Docker is always recommended. Support for older version is on a best-effort basis.
+Open `http://<host>:8080`. Without `WEBUI_PASSWORD`, qBittorrent prints a temporary password in the log on first start; set your own under Options, WebUI.
 
-# Building the container yourself
-To build this container, clone the repository and cd into it.
+Check that traffic leaves through the VPN:
 
-## Build it:
-```
-$ cd /repo/location/qbittorrentvpn
-$ docker build -t qbittorrentvpn .
-```
-## Run it:
-```
-$ docker run --privileged  -d \
-              -v /your/config/path/:/config \
-              -v /your/downloads/path/:/downloads \
-              -e "VPN_ENABLED=yes" \
-              -e "LAN_NETWORK=192.168.1.0/24" \
-              -e "NAME_SERVERS=8.8.8.8,8.8.4.4" \
-              -p 8080:8080 \
-              -p 8999:8999 \
-              -p 8999:8999/udp \
-              qbittorrentvpn
+```bash
+docker exec qbittorrentvpn qbtvpn-status
 ```
 
-This will start a container as described in the "Run container from Docker registry" section.
+The [commands page](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Commands.md) shows what each section means, with example output.
+
+WireGuard users drop `VPN_USERNAME` and `VPN_PASSWORD`. `LAN_NETWORK` is the network your browser is on; without it the WebUI is reachable only from the Docker network.
+
+## Why this image
+
+A VPN container is only as good as what happens when the VPN is not there. Here the firewall comes first: it is loaded before any VPN process starts, it allows traffic out only through the tunnel and to the exact address and port of each VPN server, and it never opens again. If the tunnel drops, packets are refused, not rerouted. Every rule set is loaded in one atomic step, so there is no moment with half a firewall.
+
+Building from source keeps qBittorrent current. Upstream publishes no Linux headless binaries, and distribution packages lag. Each build resolves the newest stable qBittorrent and libtorrent releases, verifies the downloads, and links against Alpine's maintained Qt, Boost and OpenSSL. libtorrent 2.1 is the default. Its disk backend uses `pread` and `pwrite` rather than memory-mapped files, which is faster on spinning disks, network mounts and FUSE shares such as Unraid's.
+
+## How the kill switch works
+
+Start-up runs in a fixed order:
+
+1. The firewall drops everything except loopback and the DNS lookups needed to find the VPN server.
+2. VPN server names are resolved once and pinned. OpenVPN and WireGuard are given addresses, never names, so a reconnect needs no DNS outside the tunnel.
+3. The final rules load: out through the tunnel, out to each pinned server address and port, in and out for your LAN and the Docker network, nothing else. IPv6 leaves only through the tunnel.
+4. The VPN starts, then DNS is pointed at the VPN's servers. Lookups to any other server, including Docker's at 127.0.0.11, are dropped.
+5. qBittorrent starts bound to the tunnel interface.
+
+The end-to-end tests run this against real WireGuard and OpenVPN servers in containers. They record every packet the container sends on its network and fail on any packet that is not VPN transport or a WebUI reply. The full rule set, and how to check it yourself, are on the [kill switch page](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Kill-Switch.md).
+
+## Configuration
+
+The settings most setups touch. Every variable, with its default, is in the [configuration reference](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Configuration.md).
+
+<details>
+<summary>Common variables</summary>
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VPN_ENABLED` | `yes` | `no` runs qBittorrent with no VPN and no firewall |
+| `VPN_TYPE` | `auto` | `openvpn` or `wireguard`; `auto` picks by which config folder has a file |
+| `VPN_USERNAME`, `VPN_PASSWORD` | none | OpenVPN credentials; `_FILE` variants read Docker secrets |
+| `LAN_NETWORK` | none | Comma-separated networks allowed to reach the WebUI, such as `192.168.1.0/24` |
+| `NAME_SERVERS` | from the VPN | DNS servers, used through the tunnel |
+| `VPN_PORT_FORWARDING` | `auto` | `off`, `auto`, `protonvpn`, `natpmp` or `pia` |
+| `VPN_RECOVERY_TIMEOUT` | `300` | Seconds the tunnel may stay down before the container exits; `0` never exits |
+| `PUID`, `PGID` | `99`, `100` | User and group qBittorrent runs as |
+| `UMASK` | `002` | Permissions for new files |
+| `WEBUI_PORT` | `8080` | WebUI port; publish the same port |
+| `INCOMING_PORT` | from qBittorrent | Listen port, for providers that forward a fixed port |
+| `WEBUI_USERNAME`, `WEBUI_PASSWORD` | none | WebUI login, applied on every start |
+| `QBT_CONF_<Section>__<Key>` | none | Any qBittorrent.conf setting, such as `QBT_CONF_BitTorrent__Session__MaxConnections=500` |
+
+</details>
+
+| Volume | Holds |
+|---|---|
+| `/config` | `openvpn/`, `wireguard/` and qBittorrent's profile in `qBittorrent/` |
+| `/downloads` | The default save path |
+
+The container needs `NET_ADMIN` and `/dev/net/tun`. It refuses to start with host networking, where its firewall would replace the host's.
+
+## Port forwarding
+
+Incoming connections are what make torrents fast behind a VPN. With the default `VPN_PORT_FORWARDING=auto`, a Private Internet Access configuration uses PIA's port API, and for any other provider the container sends one NAT-PMP request, which ProtonVPN supports. A forwarded port is opened on the tunnel and set in qBittorrent while it runs. Providers that assign a fixed port in their dashboard need only `INCOMING_PORT`. Setup per provider is on the [port forwarding page](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Port-Forwarding.md).
+
+## Upgrading from 1.x
+
+Pull the new image and start it with the same volumes and variables. The OpenVPN file, `credentials.conf` and qBittorrent's settings are read where they were. Two things change: qBittorrent no longer runs as root when `PUID` and `PGID` are unset (it runs as 99:100), and the WebUI no longer ships the old default password. The [upgrade page](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Upgrading-From-1.x.md) lists every difference.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `Dockerfile` | Source, build and runtime stages |
+| `build/` | Version resolution, verified source download, the compile script |
+| `keys/` | The OpenPGP key qBittorrent's tarballs are signed with |
+| `rootfs/usr/local/bin/` | `qbtvpn-entrypoint`, `qbtvpn-healthcheck`, `qbtvpn-status` |
+| `rootfs/usr/local/lib/qbtvpn/` | Firewall, network, DNS, OpenVPN, WireGuard, port forwarding and qBittorrent configuration |
+| `tests/` | Unit tests, end-to-end leak tests and their test doubles |
+| `docs/` | The documentation |
+| `.github/workflows/` | CI on every branch but `main`; scheduled publishing from `main` |
+
+## Building and testing
+
+```bash
+docker buildx build --build-arg "$(bash build/resolve-qt.sh)" -t qbittorrentvpn:dev .
+bash tests/run.sh unit qbittorrentvpn:dev
+bash tests/run.sh e2e qbittorrentvpn:dev
+```
+
+Build arguments select versions: `QBITTORRENT_VERSION`, `LIBTORRENT_SERIES` (`2.1`, `2.0` or `1.2`), `LIBTORRENT_VERSION`, `QT_VERSION` (printed by `build/resolve-qt.sh`), and `INSTALL_PYTHON=no` for an image without the search plugins' Python. The [building page](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/Building.md) covers them and the tests.
+
+## Platforms
+
+Published for `linux/amd64` and `linux/arm64`. Any Docker or Podman host whose kernel has iptables or nftables works; WireGuard uses the kernel module when present and `wireguard-go` otherwise.
+
+## Documentation
+
+The [docs folder](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/docs/README.md) holds the quick start, provider setup, port forwarding, the kill switch, the commands, troubleshooting and the full configuration reference.
+
+## License
+
+GPL-3.0-only. See [LICENSE](https://github.com/MarkusMcNugen/docker-qBittorrentvpn/blob/main/LICENSE).

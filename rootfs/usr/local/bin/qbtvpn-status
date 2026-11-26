@@ -1,0 +1,49 @@
+#!/bin/bash
+# Prints what the container is doing: health, VPN state, tunnel address,
+# public IP as seen through the tunnel, DNS, forwarded port, firewall policy
+# and qBittorrent's version. Run with: docker exec <container> qbtvpn-status
+set -u
+. /usr/local/lib/qbtvpn/common.sh
+. /usr/local/lib/qbtvpn/openvpn.sh
+
+section() { printf '\n== %s\n' "$1"; }
+
+section "health"
+cat "$QBTVPN_RUN/state/health" 2>/dev/null || echo "no health record"
+
+section "build"
+cat "$QBTVPN_SHARE/build-info"
+
+section "tunnel"
+for dev in tun0 tap0 wg0; do
+  if ip link show dev "$dev" >/dev/null 2>&1; then
+    ip -o addr show dev "$dev" | awk '{ print $2, $3, $4 }'
+    if [ "$dev" = wg0 ]; then
+      wg show wg0 | awk '/endpoint|latest handshake|transfer/'
+    fi
+  fi
+done
+if [ -S "$QBTVPN_RUN/openvpn/state/mgmt.sock" ]; then
+  ovpn_mgmt "$QBTVPN_RUN/openvpn/state/mgmt.sock" state | awk -F, '/^[0-9]+,/ { print "openvpn:", $2, $4, "server", $5 }'
+fi
+
+section "public address through the tunnel"
+curl -fsS --max-time 10 https://api.ipify.org && echo || echo "unreachable"
+
+section "dns"
+awk '$1 == "nameserver"' /etc/resolv.conf
+
+section "port forwarding"
+if [ -s "$QBTVPN_RUN/pf/port" ]; then echo "forwarded port $(cat "$QBTVPN_RUN/pf/port")"; else echo "none"; fi
+
+section "firewall"
+for ipt in iptables-nft iptables-legacy ip6tables-nft ip6tables-legacy; do
+  if out=$("$ipt" -w 5 -S 2>/dev/null) && grep -q 'QBTVPN_TUNNEL_IN' <<<"$out"; then
+    echo "$ipt:"
+    awk '/^-P|QBTVPN_TUNNEL_IN -p/' <<<"$out"
+  fi
+done
+
+section "qbittorrent"
+qbittorrent-nox --version 2>&1
+awk '/^\[BitTorrent\]/ { s = 1; next } /^\[/ { s = 0 } s && /^Session\\(Port|Interface|InterfaceName)=/' /config/qBittorrent/config/qBittorrent.conf

@@ -1,0 +1,24 @@
+services:
+  qbittorrentvpn:
+    image: markusmcnugen/qbittorrentvpn:latest
+    container_name: qbittorrentvpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      LAN_NETWORK: 192.168.1.0/24
+      PUID: "99"
+      PGID: "100"
+      TZ: Etc/UTC
+      # For OpenVPN providers that log in with a username and password:
+      # VPN_USERNAME: your-vpn-username
+      # VPN_PASSWORD: your-vpn-password
+    volumes:
+      - ./config:/config
+      - ./downloads:/downloads
+    ports:
+      - 8080:8080
+    restart: unless-stopped
+    # Longer than QBT_STOP_TIMEOUT (120 s), so qBittorrent can save its resume data.
+    stop_grace_period: 150s

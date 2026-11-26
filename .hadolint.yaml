@@ -1,0 +1,4 @@
+ignored:
+  # Packages follow the Alpine release branch so the weekly rebuild picks up
+  # its security fixes; Alpine removes superseded versions, so pins would break.
+  - DL3018

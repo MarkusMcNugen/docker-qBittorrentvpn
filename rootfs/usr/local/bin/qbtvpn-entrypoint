@@ -1,0 +1,203 @@
+#!/bin/bash
+# Container entrypoint and supervisor.
+#
+# Start-up, in order: read the configuration; lock the firewall down to
+# loopback and bootstrap DNS; resolve and pin the VPN endpoints; load the
+# final kill-switch ruleset; start the VPN and wait for it; point DNS at the
+# tunnel; start port forwarding; write qBittorrent.conf; start qBittorrent.
+#
+# Then every VPN_CHECK_INTERVAL seconds: check qBittorrent and the tunnel,
+# apply DNS and forwarded-port changes, and record health. A tunnel that
+# stays down for VPN_RECOVERY_TIMEOUT seconds stops the container, which the
+# restart policy then starts from scratch.
+#
+# On SIGTERM: stop port forwarding, stop qBittorrent and let it save resume
+# data, then stop the VPN. The firewall stays closed throughout.
+set -Eeuo pipefail
+shopt -s inherit_errexit
+
+for lib in common config network firewall dns openvpn wireguard vpn qbittorrent portforward; do
+  # shellcheck source=/dev/null
+  . "/usr/local/lib/qbtvpn/${lib}.sh"
+done
+
+SHUTTING_DOWN=no
+UNHEALTHY_SINCE=0
+
+on_error() {
+  log_error "command failed with status $1 at line $2: $3"
+}
+trap 'on_error $? $LINENO "$BASH_COMMAND"' ERR
+
+shutdown() {
+  local code="$1"
+  if [ "$SHUTTING_DOWN" = yes ]; then return 0; fi
+  SHUTTING_DOWN=yes
+  trap - TERM INT QUIT ERR
+  set +e
+  pf_stop
+  qbt_stop
+  vpn_stop
+  state_write health "stopped $(now)"
+  log_info "shut down with status ${code}"
+  exit "$code"
+}
+
+on_signal() {
+  log_info "received SIG${1}; shutting down"
+  shutdown 0
+}
+
+on_exit() {
+  local code=$?
+  if [ "$SHUTTING_DOWN" != yes ]; then
+    SHUTTING_DOWN=yes
+    set +e
+    pf_stop
+    qbt_stop
+    vpn_stop
+  fi
+  return "$code"
+}
+
+reset_runtime_dir() {
+  mkdir -p "$QBTVPN_RUN"
+  chmod 0755 "$QBTVPN_RUN"
+  find "$QBTVPN_RUN" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  mkdir -p "$QBTVPN_RUN/state"
+  chmod 0700 "$QBTVPN_RUN/state"
+}
+
+bootstrap_vpn() {
+  local line
+  net_refuse_host_network
+  net_capture
+  fw_detect_backend
+  fw_apply_lockdown
+  vpn_select_kind
+  vpn_prepare
+  net_add_lan_routes
+  FW_LOCAL=()
+  while IFS= read -r line; do FW_LOCAL+=("$line"); done < <(net_local_and_lan)
+  FW_DNS_EXCEPTIONS=()
+  while IFS= read -r line; do FW_DNS_EXCEPTIONS+=("$line"); done < <(dns_lan_exceptions)
+  FW_TUNNEL_PORTS=()
+  if [ -n "$CFG_INCOMING_PORT" ]; then FW_TUNNEL_PORTS=("$CFG_INCOMING_PORT"); fi
+  fw_apply_final
+  vpn_start
+  vpn_wait_connected
+  vpn_refresh_dns
+  pf_start
+}
+
+# Opens the listen port on the tunnel when qBittorrent's configured port
+# changes, for example from the WebUI.
+sync_listen_port() {
+  local port
+  port=$(qbt_ini_get BitTorrent 'Session\Port')
+  if [ -n "$port" ] && is_port "$port" && [ "$port" != "${FW_TUNNEL_PORTS[*]-}" ]; then
+    fw_set_tunnel_ports "$port"
+  fi
+}
+
+# Applies a new forwarded port: open it on the tunnel, then set it in qBittorrent.
+apply_forwarded_port() {
+  local port
+  port=$(pf_current_port)
+  [ -n "$port" ] || return 0
+  if [ "$port" != "$PF_APPLIED" ]; then
+    fw_set_tunnel_ports "$port"
+    if qbt_set_listen_port "$port"; then
+      PF_APPLIED="$port"
+    else
+      log_warn "port forwarding: qBittorrent did not take port ${port}; retrying at the next check"
+    fi
+  fi
+}
+
+webui_responds() {
+  local scheme=http code
+  if [ "$(qbt_webui_get 'HTTPS\Enabled')" = true ]; then scheme=https; fi
+  code=$(curl -ks -o /dev/null -w '%{http_code}' --max-time 5 "${scheme}://127.0.0.1:${CFG_WEBUI_PORT}/") || code=000
+  [ "$code" != 000 ]
+}
+
+supervise() {
+  local detail status elapsed
+  while :; do
+    sleep "$CFG_CHECK_INTERVAL" &
+    wait $! || true
+    if ! qbt_alive; then
+      log_error "qbittorrent: exited unexpectedly"
+      shutdown 1
+    fi
+    status=ok
+    if [ "$CFG_VPN_ENABLED" = yes ]; then
+      if vpn_healthy; then
+        if [ "$UNHEALTHY_SINCE" -ne 0 ]; then
+          log_info "vpn: recovered after $(($(now) - UNHEALTHY_SINCE)) s (${VPN_HEALTH_DETAIL})"
+          UNHEALTHY_SINCE=0
+        fi
+        vpn_refresh_dns
+        if [ "$PF_MODE" != off ]; then apply_forwarded_port; else sync_listen_port; fi
+      else
+        status=unhealthy
+        if [ "$UNHEALTHY_SINCE" -eq 0 ]; then
+          UNHEALTHY_SINCE=$(now)
+          log_warn "vpn: tunnel down (${VPN_HEALTH_DETAIL}); traffic stays blocked while it recovers"
+        fi
+        elapsed=$(($(now) - UNHEALTHY_SINCE))
+        if [ "$CFG_RECOVERY_TIMEOUT" -gt 0 ] && [ "$elapsed" -ge "$CFG_RECOVERY_TIMEOUT" ]; then
+          log_error "vpn: down for ${elapsed} s, past VPN_RECOVERY_TIMEOUT=${CFG_RECOVERY_TIMEOUT}; stopping so the restart policy starts afresh"
+          shutdown 1
+        fi
+      fi
+    fi
+    detail="${VPN_HEALTH_DETAIL:-vpn disabled}"
+    if ! webui_responds; then
+      status=unhealthy
+      detail="${detail}; WebUI not responding on port ${CFG_WEBUI_PORT}"
+    fi
+    state_write health "${status} $(now) ${detail}"
+  done
+}
+
+main() {
+  local listen_port=""
+  umask 022
+  load_config
+  if [ "$QBTVPN_DEBUG" = 1 ]; then
+    export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+    set -x
+  fi
+  log_info "qbittorrentvpn starting: $(tr '\n' ' ' <"$QBTVPN_SHARE/build-info")"
+  log_config
+  reset_runtime_dir
+  trap 'on_signal TERM' TERM
+  trap 'on_signal INT' INT
+  trap 'on_signal QUIT' QUIT
+  trap on_exit EXIT
+  qbt_detect_version
+
+  if [ "$CFG_VPN_ENABLED" = yes ]; then
+    bootstrap_vpn
+    listen_port=$(pf_wait_first_port)
+    if [ -n "$listen_port" ]; then
+      PF_APPLIED="$listen_port"
+      fw_set_tunnel_ports "$listen_port"
+    fi
+  else
+    log_warn "VPN_ENABLED=no: no VPN and no firewall; qBittorrent's traffic leaves through the host's own connection"
+  fi
+  [ -n "$listen_port" ] || listen_port="$CFG_INCOMING_PORT"
+
+  qbt_prepare_ownership
+  qbt_write_config "$listen_port"
+  if [ "$CFG_VPN_ENABLED" = yes ] && [ "$PF_MODE" = off ]; then
+    fw_set_tunnel_ports "$QBT_LISTEN_PORT"
+  fi
+  qbt_start
+  supervise
+}
+
+main "$@"

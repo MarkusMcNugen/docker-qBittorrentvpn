@@ -1,0 +1,20 @@
+#!/bin/bash
+# Docker HEALTHCHECK: healthy when the supervisor's last record says "ok" and
+# is recent. The supervisor writes it every VPN_CHECK_INTERVAL seconds, so a
+# record older than three intervals plus 30 s means the supervisor is stuck.
+set -u
+health=/run/qbtvpn/state/health
+interval="${VPN_CHECK_INTERVAL:-15}"
+[[ "$interval" =~ ^[0-9]+$ ]] || interval=15
+if [ ! -r "$health" ]; then
+  echo "starting: no health record yet"
+  exit 1
+fi
+read -r status stamp detail <"$health"
+age=$(($(date +%s) - ${stamp:-0}))
+if [ "$age" -gt $((interval * 3 + 30)) ]; then
+  echo "stale: last record ${age} s old (${status} ${detail})"
+  exit 1
+fi
+echo "${status}: ${detail}"
+[ "$status" = ok ]
