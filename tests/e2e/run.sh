@@ -59,6 +59,16 @@ check_eq_within() {
   fail "${name}: got '${got}' $(tr '\n' ' ' <"$work/check.err")"
 }
 in_client() { docker exec "${p}-client" "$@"; }
+
+# keep FILE NAME / keep_client_log SCENARIO: with E2E_LOG_DIR set, copy FILE,
+# or the client container's whole log, into that directory as NAME or
+# SCENARIO-client.log, for debugging and for the wiki's sample output.
+keep() { if [ -n "${E2E_LOG_DIR-}" ]; then mkdir -p "$E2E_LOG_DIR" && cp "$1" "$E2E_LOG_DIR/$2"; fi; }
+keep_client_log() {
+  if [ -n "${E2E_LOG_DIR-}" ]; then
+    mkdir -p "$E2E_LOG_DIR" && docker logs "${p}-client" >"$E2E_LOG_DIR/$1-client.log" 2>&1
+  fi
+}
 # probe CMD ARGS...: runs CMD in a throwaway container on the lan network.
 probe() {
   local cmd="$1"
@@ -143,7 +153,15 @@ wait_for() {
   done
 }
 
-fails_quickly() { ! timeout 12 "$@" >/dev/null 2>&1; }
+# fails_quickly CMD...: true when CMD fails or has not finished after 12 s.
+# timeout runs only programs, so CMD runs in a bash that timeout starts,
+# which gets in_client and probe and their variables through the environment.
+fails_quickly() { ! timeout 12 bash -c '"$@"' _ "$@" >/dev/null 2>&1; }
+export -f in_client probe
+export p lan helper
+
+# not CMD...: true when CMD fails.
+not() { ! "$@"; }
 
 webui_code() { probe curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://${client_ip}:8080/"; }
 
@@ -193,12 +211,13 @@ leak_check() {
     printf '%s\n' "$leaks" | awk '{ print "  leaked: " $0 }'
     return 1
   fi
-  say "capture: $(docker run --rm -v "$work/cap:/shared" --entrypoint tcpdump "$helper" -r /shared/lan.pcap -n "src host ${client_ip}" 2>/dev/null | wc -l) packets from the client, all VPN transport or WebUI replies"
+  say "capture: $(docker run --rm -v "$work/cap:/shared" --entrypoint tcpdump "$helper" -r /shared/lan.pcap -n "src host ${client_ip}" 2>/dev/null | wc -l) packets from the client, all VPN transport or WebUI and Privoxy replies"
 }
 
-# client_warnings: prints every warning or error line in the client's log.
+# client_warnings: prints every warning or error line in the client's log,
+# including notes other tools print, such as iptables' "# Warning:".
 client_warnings() {
-  docker logs "${p}-client" 2>&1 | grep -E '\[(warn|error)\]|WARNING|DEPRECATED|ERROR'
+  docker logs "${p}-client" 2>&1 | grep -E '\[(warn|error)\]|WARNING|[Ww]arning:|DEPRECATED|ERROR'
 }
 
 # server_warnings ROLE: prints every warning or error line in a test server's log.
@@ -222,6 +241,7 @@ start_client() {
 # same request gets an answer from a container without the firewall.
 scenario_common() {
   local tun="$1" server_wan_ip="$2" tunnel_dns="$3" server_lan_ip="$4"
+  check "control: fails_quickly does not pass a command that succeeds" not fails_quickly in_client true
   check_eq "egress goes through the tunnel (target sees ${server_wan_ip})" "$server_wan_ip" \
     in_client curl -fsS --max-time 10 http://target.e2e/cgi-bin/ip
   check "resolv.conf points at the tunnel DNS ${tunnel_dns}" in_client grep -q "nameserver ${tunnel_dns}" /etc/resolv.conf
@@ -317,6 +337,7 @@ scenario_wireguard() {
   privoxy_checks 172.31.251.2 "${p}-wg" 10.13.0.2
   say "---- qbtvpn-status"
   docker exec "${p}-client" qbtvpn-status 2>&1 | tee "$work/status.txt" | awk '{ print "  " $0 }'
+  keep "$work/status.txt" wireguard-status.txt
   check "qbtvpn-status shows the WireGuard handshake" grep -q 'latest handshake' "$work/status.txt"
   check "qbtvpn-status shows Privoxy listening on 8118" grep -q '^listening on port 8118 (pid [0-9]*)$' "$work/status.txt"
   check "WebUI is unreachable from the tunnel side" fails_quickly docker exec "${p}-wg" curl -s --max-time 5 http://10.13.0.2:8080/
@@ -325,6 +346,8 @@ scenario_wireguard() {
 
   check "kill switch: with wg0 deleted, traffic falls back to eth0 and is refused" \
     fails_quickly in_client sh -c 'ip link del dev wg0 && curl -s --max-time 4 http://172.31.251.10/cgi-bin/ip'
+  check "the supervisor saw wg0 gone and recreated it" \
+    wait_for 30 sh -c "docker logs ${p}-client 2>&1 | grep -q 'vpn: wg0 is gone; recreating it'"
   check "recreates wg0 in place and traffic flows again" wait_for 90 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
 
   docker exec "${p}-wg" ip link set wg0 down
@@ -344,6 +367,7 @@ scenario_wireguard() {
   check "qBittorrent stopped before the tunnel was removed" sh -c \
     "docker logs ${p}-client 2>&1 | awk '/qbittorrent: stopped/ { q = NR } /wireguard: wg0 removed/ { w = NR } END { exit !(q && w && q < w) }'"
   check "no packet left outside the tunnel" leak_check "(udp and dst host 172.31.250.2 and dst port 51820) or (tcp and src port 8118)"
+  keep_client_log wireguard
   if [ "$fails" -gt 0 ]; then diagnose; fi
   remove_containers
 }
@@ -367,6 +391,7 @@ scenario_openvpn() {
     sh -c "docker exec ${p}-client ip -6 route show 2000::/4 | awk '{ print \$1, \$2, \$3 }'"
   say "---- qbtvpn-status"
   docker exec "${p}-client" qbtvpn-status 2>&1 | tee "$work/status.txt" | awk '{ print "  " $0 }'
+  keep "$work/status.txt" openvpn-status.txt
   check_eq "qbtvpn-status shows the OpenVPN tunnel" "openvpn: CONNECTED 10.14.0.2 server 172.31.250.3" \
     grep '^openvpn:' "$work/status.txt"
   check "Privoxy is off by default" \
@@ -375,8 +400,13 @@ scenario_openvpn() {
   check_eq "the client logged no warning or error while the tunnel was up" "" client_warnings
   check_eq "the OpenVPN test server logged no warning or error" "" server_warnings ovpn
 
+  # The probe runs as soon as that OpenVPN process is gone, before the
+  # supervisor's next check can start another and reconnect.
+  # shellcheck disable=SC2016  # expanded inside the container
   check "kill switch: with OpenVPN killed, traffic falls back to eth0 and is refused" \
-    fails_quickly in_client sh -c 'pkill -KILL -x openvpn; sleep 1; curl -s --max-time 4 http://172.31.251.10/cgi-bin/ip'
+    fails_quickly in_client sh -c 'pid=$(pidof openvpn) && kill -KILL "$pid" && while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done && curl -s --max-time 4 http://172.31.251.10/cgi-bin/ip'
+  check "the supervisor saw OpenVPN exit and restarted it" \
+    wait_for 30 sh -c "docker logs ${p}-client 2>&1 | grep -q 'vpn: openvpn process exited; restarting it'"
   check "restarts OpenVPN in place and traffic flows again" wait_for 120 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
 
   docker exec "${p}-ovpn" pkill -x openvpn
@@ -391,6 +421,7 @@ scenario_openvpn() {
   check "qBittorrent stopped before OpenVPN" sh -c \
     "docker logs ${p}-client 2>&1 | awk '/qbittorrent: stopped/ { q = NR } /openvpn: stopped/ { o = NR } END { exit !(q && o && q < o) }'"
   check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.3 and dst port 1194"
+  keep_client_log openvpn
   if [ "$fails" -gt 0 ]; then diagnose; fi
   remove_containers
 }
@@ -419,6 +450,7 @@ scenario_openvpn_no_ipv6() {
   docker stop -t 60 "${p}-client" >/dev/null
   check "docker stop exits cleanly" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 0
   check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.3 and dst port 1194"
+  keep_client_log openvpn_no_ipv6
   if [ "$fails" -gt 0 ]; then diagnose; fi
   remove_containers
 }

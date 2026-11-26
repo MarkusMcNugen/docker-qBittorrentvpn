@@ -1,0 +1,68 @@
+# Builds the wiki under wiki/ (Hugo with the Hextra theme) and deploys it to
+# GitHub Pages on every push to main. There is no paths filter, so every
+# release deploys the documentation that describes it.
+name: Deploy wiki
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    env:
+      HUGO_VERSION: 0.170.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.27"
+          cache-dependency-path: wiki/go.sum
+      - id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      # The package is checked against the SHA-256 in the release's own
+      # checksums file before it is installed.
+      - name: Install Hugo
+        working-directory: ${{ runner.temp }}
+        run: |
+          deb="hugo_extended_${HUGO_VERSION}_linux-amd64.deb"
+          base="https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}"
+          curl -fsSL -o "$deb" "$base/$deb"
+          curl -fsSL -o checksums.txt "$base/hugo_${HUGO_VERSION}_checksums.txt"
+          grep " $deb\$" checksums.txt | sha256sum --check --strict
+          sudo dpkg -i "$deb"
+          hugo version
+      - name: Build
+        working-directory: wiki
+        env:
+          HUGO_ENVIRONMENT: production
+        run: hugo --gc --minify --baseURL "${{ steps.pages.outputs.base_url }}/"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: wiki/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

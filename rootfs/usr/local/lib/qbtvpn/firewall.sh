@@ -200,11 +200,15 @@ fw_load() {
   return 0
 }
 
+# fw_verify_policy v4|v6: exits unless every built-in chain's policy is DROP.
+# iptables' output is captured, so iptables-nft's note that legacy tables also
+# exist never reaches the log; a failing call stops start-up with its output.
 fw_verify_policy() {
-  local family="$1" ipt chain
+  local family="$1" ipt chain out
   if [ "$family" = v4 ]; then ipt="$FW_IPT"; else ipt="$FW_IP6T"; fi
   for chain in INPUT FORWARD OUTPUT; do
-    "$ipt" -w 5 -S "$chain" | awk -v c="$chain" 'NR == 1 && $1 == "-P" && $2 == c && $3 == "DROP" { ok = 1 } END { exit !ok }' \
+    out=$("$ipt" -w 5 -S "$chain" 2>&1) || die "firewall: ${ipt} -S ${chain} failed: $(tr '\n' ' ' <<<"$out")"
+    awk -v c="$chain" '$1 == "-P" && $2 == c { p = $3; exit } END { exit p != "DROP" }' <<<"$out" \
       || die "firewall: ${family} ${chain} policy is not DROP after loading the ruleset"
   done
 }

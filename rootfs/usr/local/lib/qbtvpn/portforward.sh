@@ -295,10 +295,17 @@ pf_current_port() {
   return 0
 }
 
+# Stops the port forwarding loop, then the command it was running. The loop
+# goes first: a shell that outlives its killed child reports the kill in the log.
 pf_stop() {
+  local kids
   if [ -n "$PF_PID" ] && kill -0 "$PF_PID" 2>/dev/null; then
-    pkill -TERM -P "$PF_PID"
+    kids=$(pgrep -P "$PF_PID" | tr '\n' ' ') || kids=""
     kill -TERM "$PF_PID"
+    if [ -n "$kids" ]; then
+      # shellcheck disable=SC2086  # one pid per word; a child may have exited already
+      kill -TERM $kids 2>/dev/null || :
+    fi
     wait "$PF_PID" 2>/dev/null
   fi
   return 0

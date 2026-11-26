@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.1] - 2026-11-26
+
+### Documentation
+- A wiki at https://markusmcnugen.github.io/docker-qBittorrentvpn/, built from `wiki/` with Hugo: a getting-started tutorial, how-to guides, explanations, and a reference of every environment variable, command, file, log message, build argument and test, with output from real runs. The pages in `docs/` now point to it.
+
+### Logs
+- Start-up no longer repeats iptables' note that legacy tables are present, which most hosts showed six times.
+- Stopping the container no longer logs a `Terminated` line from the port forwarding loop.
+
+### Tests
+- The end-to-end checks that traffic is refused never ran their commands: `timeout` cannot run the shell functions they called, so each passed without sending anything. They now run, and all pass; each scenario first proves the wrapper fails a command that succeeds, and the kill switch tests confirm each repair by the line the container logs.
+- The end-to-end tests fail on a `Warning:` line from any tool in the container's log, and `E2E_LOG_DIR` keeps each scenario's log and status output.
+
 ## [2.1.0] - 2026-11-26
 
 ### VPN and firewall

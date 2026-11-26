@@ -1,0 +1,67 @@
+# Hugo + Hextra configuration for the qBittorrent VPN wiki. The structure
+# follows github.com/imfing/hextra-starter-template.
+
+baseURL: https://markusmcnugen.github.io/docker-qBittorrentvpn/
+title: qBittorrent VPN
+locale: en-us
+enableRobotsTXT: true
+enableGitInfo: true
+
+module:
+  hugoVersion:
+    extended: true
+    min: 0.166.0
+  imports:
+    - path: github.com/imfing/hextra
+
+markup:
+  goldmark:
+    renderer:
+      unsafe: true
+  highlight:
+    noClasses: false
+
+menu:
+  main:
+    - identifier: docs
+      name: Docs
+      pageRef: /docs
+      weight: 1
+    - name: Search
+      weight: 2
+      params:
+        type: search
+    - name: GitHub
+      weight: 3
+      url: https://github.com/MarkusMcNugen/docker-qBittorrentvpn
+      params:
+        icon: github
+
+params:
+  description: qBittorrent built from source, reachable only through an OpenVPN or WireGuard tunnel behind a fail-closed firewall.
+
+  navbar:
+    displayTitle: true
+    displayLogo: false
+
+  page:
+    width: wide
+
+  theme:
+    default: system
+    displayToggle: true
+
+  footer:
+    displayCopyright: false
+    displayPoweredBy: true
+
+  editURL:
+    enable: true
+    base: https://github.com/MarkusMcNugen/docker-qBittorrentvpn/edit/main/wiki/content
+
+  search:
+    enable: true
+    type: flexsearch
+    flexsearch:
+      index: content
+      tokenize: forward
