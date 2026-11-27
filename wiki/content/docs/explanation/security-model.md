@@ -23,7 +23,7 @@ The ids 873 and 874 are fixed in the image, and `PUID`/`PGID` may not take them,
 | Torrent traffic leaving outside the VPN when it drops, restarts or misbehaves | The [kill switch](../the-kill-switch/): `DROP` policies loaded before the VPN starts, never opened again, verified after each load |
 | DNS revealing what you download | DNS only through the tunnel; Docker's resolver blocked; the VPN servers resolved once, before the final rules, so reconnects need no DNS |
 | IPv6 bypassing an IPv4-only tunnel | IPv6 leaves only through the tunnel, and is removed altogether when `ip6tables` does not work |
-| qBittorrent reaching the internet another way | Besides the firewall, qBittorrent is bound to the tunnel interface, and its user is refused even the VPN servers' addresses |
+| qBittorrent reaching the internet another way | Besides the firewall, qBittorrent is bound to the tunnel interface, and unless `PUID` is 0 its user is refused even the VPN servers' addresses |
 | A local proxy becoming a way around the VPN | Privoxy's new connections may only enter the tunnel, so it cannot reach the LAN, the Docker networks or the WebUI on loopback |
 | Someone else using the WebUI | It is reachable only from `LAN_NETWORK` and the container's networks; a password is required, set from `WEBUI_PASSWORD` or a temporary one in the log; CSRF protection is on for new installs |
 | Peers reaching the container | The tunnel accepts inbound connections only on qBittorrent's listen port |

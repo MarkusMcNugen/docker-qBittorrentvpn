@@ -186,7 +186,7 @@ Build arguments select versions: `QBITTORRENT_VERSION`, `LIBTORRENT_SERIES` (`2.
 
 ## Platforms
 
-Published for `linux/amd64` and `linux/arm64`. Any Docker or Podman host whose kernel has iptables or nftables works; WireGuard uses the kernel module when present and `wireguard-go` otherwise.
+Published for `linux/amd64` and `linux/arm64`. Any Docker or Podman host whose kernel has iptables or nftables works, [rootless included](https://markusmcnugen.github.io/docker-qBittorrentvpn/docs/reference/container-requirements/#rootless-docker-and-podman); WireGuard uses the kernel module when present and `wireguard-go` otherwise.
 
 ## Documentation
 

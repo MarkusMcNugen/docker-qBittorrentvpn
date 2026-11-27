@@ -14,7 +14,7 @@ set -uo pipefail
 image="${1:?usage: tests/e2e/run.sh IMAGE [scenario...]}"
 shift
 scenarios=("$@")
-[ "${#scenarios[@]}" -gt 0 ] || scenarios=(wireguard openvpn openvpn_no_ipv6)
+[ "${#scenarios[@]}" -gt 0 ] || scenarios=(wireguard wireguard_userspace openvpn openvpn_no_ipv6 start_failure)
 
 here=$(cd "$(dirname "$0")" && pwd)
 p=qbtvpn-e2e
@@ -220,6 +220,15 @@ client_warnings() {
   docker logs "${p}-client" 2>&1 | grep -E '\[(warn|error)\]|WARNING|[Ww]arning:|DEPRECATED|ERROR'
 }
 
+# The lines bash itself writes, as opposed to the container's own log lines: a
+# script error, or a job notice such as "line 14:   256 Killed   env -i ...".
+SHELL_NOTICE_RE='^/[^ :]+: line [0-9]+: '
+
+# shell_notices: prints every line bash itself wrote to the client's log.
+shell_notices() {
+  docker logs "${p}-client" 2>&1 | grep -E "$SHELL_NOTICE_RE"
+}
+
 # server_warnings ROLE: prints every warning or error line in a test server's log.
 server_warnings() {
   docker logs "${p}-$1" 2>&1 | grep -Ei 'warning|error|deprecated'
@@ -344,8 +353,29 @@ scenario_wireguard() {
   check_eq "the client logged no warning or error while the tunnel was up" "" client_warnings
   check_eq "the WireGuard test server logged no warning or error" "" server_warnings wg
 
+  # paused_probe keep|delete: fetches the target with the supervisor, tini's
+  # only child, paused, after deleting wg0 when told to. The pause keeps the
+  # supervisor from recreating wg0, which it does within milliseconds of its
+  # next check, before the fetch. A failure to pause fails both checks.
+  # shellcheck disable=SC2016  # expanded inside the container
+  local paused_probe='
+    unpaused() { kill -CONT "$sup"; if [ "$1" = keep ]; then exit 1; fi; exit 0; }
+    sup=$(pgrep -P 1) && grep -q qbtvpn-entrypoint "/proc/${sup}/cmdline" || unpaused "$1"
+    kill -STOP "$sup" || unpaused "$1"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      grep -q "^State:.*stopped" "/proc/${sup}/status" && break
+      sleep 0.1
+    done
+    grep -q "^State:.*stopped" "/proc/${sup}/status" || unpaused "$1"
+    if [ "$1" = delete ]; then ip link del dev wg0 || unpaused "$1"; fi
+    curl -s --max-time 4 http://172.31.251.10/cgi-bin/ip
+    rc=$?
+    kill -CONT "$sup"
+    exit "$rc"'
+  check "control: with the supervisor paused and wg0 kept, the probe reaches the target" \
+    not fails_quickly in_client sh -c "$paused_probe" _ keep
   check "kill switch: with wg0 deleted, traffic falls back to eth0 and is refused" \
-    fails_quickly in_client sh -c 'ip link del dev wg0 && curl -s --max-time 4 http://172.31.251.10/cgi-bin/ip'
+    fails_quickly in_client sh -c "$paused_probe" _ delete
   check "the supervisor saw wg0 gone and recreated it" \
     wait_for 30 sh -c "docker logs ${p}-client 2>&1 | grep -q 'vpn: wg0 is gone; recreating it'"
   check "recreates wg0 in place and traffic flows again" wait_for 90 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
@@ -364,10 +394,46 @@ scenario_wireguard() {
     wait_for 260 in_client grep -q '^unhealthy .*handshake' /run/qbtvpn/state/health
   check "exits after VPN_RECOVERY_TIMEOUT" wait_for 120 sh -c "docker inspect -f '{{.State.Status}}' ${p}-client | grep -qx exited"
   check "exit status is 1" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 1
+  check_eq "bash wrote no job notice or error of its own" "" shell_notices
   check "qBittorrent stopped before the tunnel was removed" sh -c \
     "docker logs ${p}-client 2>&1 | awk '/qbittorrent: stopped/ { q = NR } /wireguard: wg0 removed/ { w = NR } END { exit !(q && w && q < w) }'"
   check "no packet left outside the tunnel" leak_check "(udp and dst host 172.31.250.2 and dst port 51820) or (tcp and src port 8118)"
   keep_client_log wireguard
+  if [ "$fails" -gt 0 ]; then diagnose; fi
+  remove_containers
+}
+
+# WireGuard through wireguard-go, as on hosts without the kernel module:
+# wireguard-go killed and replaced in place, and a clean stop.
+scenario_wireguard_userspace() {
+  say "== WireGuard through wireguard-go"
+  fresh_start
+  mkdir -p "$work/wgu" "$work/wgu-client/wireguard" "$work/downloads"
+  chmod 0777 "$work/downloads"
+  docker create --name "${p}-wg" --cap-add NET_ADMIN --sysctl net.ipv4.ip_forward=1 -e ENDPOINT_NAME="${p}-wg" \
+    --network "$lan" --ip 172.31.250.2 -v "$work/wgu:/shared" "$helper" wg >/dev/null
+  docker network connect --ip 172.31.251.2 "$wan" "${p}-wg"
+  docker start "${p}-wg" >/dev/null
+  wait_for 30 test -s "$work/wgu/client.conf" || { fail "WireGuard server did not start"; docker logs "${p}-wg"; return; }
+  cp "$work/wgu/client.conf" "$work/wgu-client/wireguard/wg0.conf"
+  start_client "$work/wgu-client" -e WIREGUARD_USERSPACE=yes
+  if ! wait_healthy 240; then fail "client with wireguard-go became healthy"; diagnose; return; fi
+  pass "client with wireguard-go became healthy"
+  check_eq "egress goes through the tunnel (target sees 172.31.251.2)" 172.31.251.2 \
+    in_client curl -fsS --max-time 10 http://target.e2e/cgi-bin/ip
+  # shellcheck disable=SC2016  # expanded inside the container
+  check "wireguard-go runs as the vpn user" test "$(in_client sh -c 'stat -c %U /proc/$(pidof wireguard-go)')" = vpn
+  check_eq "the client logged no warning or error while the tunnel was up" "" client_warnings
+  check "wireguard-go is killed" in_client pkill -KILL -x wireguard-go
+  check "the supervisor saw wireguard-go gone and replaced it" \
+    wait_for 30 sh -c "docker logs ${p}-client 2>&1 | grep -qE 'vpn: (wg0 is gone|wireguard-go exited); recreating it'"
+  check "traffic flows again through the new wireguard-go" \
+    wait_for 60 in_client curl -fsS --max-time 5 http://target.e2e/cgi-bin/ip
+  docker stop -t 60 "${p}-client" >/dev/null
+  check "docker stop exits cleanly" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 0
+  check_eq "bash wrote no job notice or error of its own" "" shell_notices
+  check_eq "neither wireguard-go printed its banner" "" sh -c "docker logs ${p}-client 2>&1 | grep -F 'Running wireguard-go is not required'"
+  keep_client_log wireguard_userspace
   if [ "$fails" -gt 0 ]; then diagnose; fi
   remove_containers
 }
@@ -418,10 +484,32 @@ scenario_openvpn() {
 
   docker stop -t 60 "${p}-client" >/dev/null
   check "docker stop exits cleanly" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 0
+  # shellcheck disable=SC2016  # $1 and $2 belong to sh -c
+  check "control: the shell-notice pattern matches a job notice" sh -c 'printf "%s\n" "$1" | grep -Eq "$2"' _ \
+    '/usr/local/lib/qbtvpn/common.sh: line 14:   256 Killed                     env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin setpriv' "$SHELL_NOTICE_RE"
+  check_eq "bash wrote no job notice or error of its own, with OpenVPN killed and stopped" "" shell_notices
   check "qBittorrent stopped before OpenVPN" sh -c \
     "docker logs ${p}-client 2>&1 | awk '/qbittorrent: stopped/ { q = NR } /openvpn: stopped/ { o = NR } END { exit !(q && o && q < o) }'"
   check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.3 and dst port 1194"
   keep_client_log openvpn
+  if [ "$fails" -gt 0 ]; then diagnose; fi
+  remove_containers
+}
+
+# A start-up failure after the supervisor's traps are in place: /config holds
+# no VPN configuration. The reason is logged once and the exit status is 1.
+scenario_start_failure() {
+  say "== A start-up failure"
+  remove_containers
+  mkdir -p "$work/empty-config" "$work/downloads"
+  start_client "$work/empty-config"
+  check "stops when /config holds no VPN configuration" \
+    wait_for 60 sh -c "docker inspect -f '{{.State.Status}}' ${p}-client | grep -qx exited"
+  check "exit status is 1" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 1
+  check_eq "the reason is logged once" 1 sh -c "docker logs ${p}-client 2>&1 | grep -c '\[error\] no VPN configuration'"
+  check_eq "nothing else is logged as an error" "" sh -c "docker logs ${p}-client 2>&1 | grep '\[error\]' | grep -v 'no VPN configuration'"
+  check_eq "bash wrote no job notice or error of its own" "" shell_notices
+  keep_client_log start_failure
   if [ "$fails" -gt 0 ]; then diagnose; fi
   remove_containers
 }
@@ -449,6 +537,7 @@ scenario_openvpn_no_ipv6() {
   check_eq "the OpenVPN test server logged no warning or error" "" server_warnings ovpn
   docker stop -t 60 "${p}-client" >/dev/null
   check "docker stop exits cleanly" test "$(docker inspect -f '{{.State.ExitCode}}' "${p}-client")" = 0
+  check_eq "bash wrote no job notice or error of its own" "" shell_notices
   check "no packet left outside the tunnel" leak_check "udp and dst host 172.31.250.3 and dst port 1194"
   keep_client_log openvpn_no_ipv6
   if [ "$fails" -gt 0 ]; then diagnose; fi

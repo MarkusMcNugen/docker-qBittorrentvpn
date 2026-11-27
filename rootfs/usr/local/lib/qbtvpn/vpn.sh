@@ -7,6 +7,7 @@
 VPN_KIND=none
 VPN_HEALTH_DETAIL=""
 WG_HEALTH_BY_HANDSHAKE=yes
+TUN_DEV="${TUN_DEV:-/dev/net/tun}"
 
 has_files() {
   local pattern="$1" skip="${2-}" f
@@ -41,16 +42,28 @@ vpn_select_kind() {
   log_info "vpn: using ${VPN_KIND} (VPN_TYPE=auto)"
 }
 
-# Makes /dev/net/tun exist and usable by the vpn user.
+# Makes the tun device exist and gives it to the vpn group, so no other user
+# in the container can open it. Under rootless Docker or Podman, or a daemon
+# with userns-remap, the device belongs to a host user the container does not
+# map and its group cannot change; it is then used as it is, provided the vpn
+# user can open it.
 vpn_prepare_tun() {
-  if [ ! -c /dev/net/tun ]; then
-    mkdir -p /dev/net
-    mknod -m 0660 /dev/net/tun c 10 200 ||
-      die "/dev/net/tun is missing and cannot be created: run the container with --device /dev/net/tun"
-    log_info "vpn: created /dev/net/tun"
+  local err
+  if [ ! -c "$TUN_DEV" ]; then
+    mkdir -p "${TUN_DEV%/*}"
+    mknod -m 0660 "$TUN_DEV" c 10 200 ||
+      die "${TUN_DEV} is missing and cannot be created: run the container with --device /dev/net/tun"
+    log_info "vpn: created ${TUN_DEV}"
   fi
-  chgrp vpn /dev/net/tun
-  chmod 0660 /dev/net/tun
+  if err=$(chgrp vpn "$TUN_DEV" 2>&1); then
+    chmod 0660 "$TUN_DEV"
+    return 0
+  fi
+  if setpriv --reuid=vpn --regid=vpn --init-groups -- test -r "$TUN_DEV" -a -w "$TUN_DEV"; then
+    log_info "vpn: ${TUN_DEV} belongs to $(stat -c %U:%G "$TUN_DEV") outside this container's user namespace (${err#chgrp: }); using it as it is, mode $(stat -c %a "$TUN_DEV")"
+    return 0
+  fi
+  die "vpn: the vpn user cannot open ${TUN_DEV} (owner $(stat -c %U:%G "$TUN_DEV"), mode $(stat -c %a "$TUN_DEV")) and its group cannot be changed (${err#chgrp: }); on the host, run chmod 0666 /dev/net/tun"
 }
 
 vpn_prepare() {
@@ -132,7 +145,7 @@ vpn_healthy() {
       ;;
     wireguard)
       if ! wg_alive; then
-        VPN_HEALTH_DETAIL="${WG_IF} is gone; recreating it"
+        VPN_HEALTH_DETAIL="${WG_DOWN_REASON}; recreating it"
         log_warn "vpn: ${VPN_HEALTH_DETAIL}"
         wg_down
         wg_up

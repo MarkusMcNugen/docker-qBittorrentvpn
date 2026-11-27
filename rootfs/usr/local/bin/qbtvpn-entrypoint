@@ -50,8 +50,12 @@ on_signal() {
   shutdown 0
 }
 
+# The ERR trap is cleared first: inside this trap BASH_COMMAND still names the
+# command that ended the shell, and the failing status this function returns
+# would otherwise log that command a second time.
 on_exit() {
   local code=$?
+  trap - ERR
   if [ "$SHUTTING_DOWN" != yes ]; then
     SHUTTING_DOWN=yes
     set +e

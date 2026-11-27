@@ -51,7 +51,7 @@ Booleans accept `yes`/`no`, `true`/`false`, `on`/`off`, `enable`/`disable` and `
 
 | Variable | Default | Accepts | Meaning |
 |---|---|---|---|
-| `PUID`, `PGID` | `99`, `100` | whole number or `root` | User and group qBittorrent runs as. 873 belongs to the vpn user and is refused |
+| `PUID`, `PGID` | `99`, `100` | whole number or `root` | User and group qBittorrent runs as. 873 belongs to the vpn user and is refused. Under rootless Docker or Podman, 0 is your own user; see [Rootless Docker and Podman](../container-requirements/#rootless-docker-and-podman) |
 | `UMASK` | `002` | three octal digits | Permissions mask for new files |
 | `WEBUI_PORT` | `8080` | port | WebUI port; `WEBUI_PORT_ENV` is read too |
 | `INCOMING_PORT` | from qBittorrent.conf | port | qBittorrent's listen port; `INCOMING_PORT_ENV` is read too |

@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.1.2] - 2026-11-26
+
+### VPN
+- The container starts under rootless Docker, rootless Podman and a daemon with `userns-remap`. There `/dev/net/tun` belongs to a host user the container does not map, and start-up stopped when it could not give the device to the vpn group; the device is now used as it is when the vpn user can open it, and start-up stops with the host command that fixes it when it cannot. Checked with OpenVPN, WireGuard in the kernel and `wireguard-go` under rootless Podman.
+- WireGuard through `wireguard-go` recovers when `wireguard-go` is killed. The killed process left its control socket behind, so its replacement was configured through the kernel, which refuses a userspace interface, and `wg0` stayed up with no peer until `VPN_RECOVERY_TIMEOUT` stopped the container, or for good with `VPN_RECOVERY_TIMEOUT=0`. The old socket is removed first, and an interface left without its peer is created again at the next check.
+
+### Logs
+- A start-up failure is logged once. The exit handler logged the command that ended start-up a second time, as `command failed with status 1 at line 1`.
+- `wireguard-go` no longer prints its boxed banner about the kernel module at every start, which said the kernel had WireGuard even on hosts without it.
+- A killed OpenVPN or `wireguard-go` no longer adds a shell job notice, such as `line 14: 256 Killed env -i ...`, to the log; the supervisor's own line reports the exit.
+
+### Documentation
+- Rootless Docker and Podman: what differs there, and why `PUID=0` and `PGID=0` are your own user.
+
+### Tests
+- The end-to-end tests fail on any line bash itself writes to the container's log, after OpenVPN is killed and after each stop, and a new `start_failure` scenario checks that a start-up failure is logged once with exit status 1.
+- A new `wireguard_userspace` scenario runs WireGuard through `wireguard-go`, kills it, and checks that traffic flows again through its replacement and that the container then stops cleanly.
+- The kill switch check that deletes `wg0` pauses the supervisor while it probes. The supervisor recreates `wg0` within milliseconds of its next check, so a probe that started just after one occasionally reached the target through the new tunnel and failed the check; the packet capture showed nothing left outside the tunnel. A control shows the paused probe reaches the target while `wg0` exists.
+
 ## [2.1.1] - 2026-11-26
 
 ### Documentation

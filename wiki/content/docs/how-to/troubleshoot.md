@@ -19,6 +19,8 @@ docker exec qbittorrentvpn qbtvpn-status
 | `interface docker0 belongs to the host` | The container runs with host networking. Use a bridge network. |
 | `no iptables backend works` | Add `--cap-add NET_ADMIN`. On very old kernels, try `FIREWALL_BACKEND=legacy`. |
 | `/dev/net/tun is missing and cannot be created` | Add `--device /dev/net/tun`. |
+| `the vpn user cannot open /dev/net/tun` | Rootless Docker or Podman on a host whose `/dev/net/tun` is not `0666`; run `chmod 0666 /dev/net/tun` on the host. See [Rootless Docker and Podman](../../reference/container-requirements/#rootless-docker-and-podman). |
+| `/dev/net/tun: Operation not permitted` | Rootless Docker or Podman with versions 2.0.0 to 2.1.1, which stop here; 2.1.2 and later use the device as it is. Update the image. |
 | `no VPN configuration` | Put the provider's file in `/config/openvpn` or `/config/wireguard`. |
 | `both /config/openvpn and /config/wireguard hold configurations` | Set `VPN_TYPE` to the one to use. |
 | `requires a username and password` | Set `VPN_USERNAME` and `VPN_PASSWORD`. |

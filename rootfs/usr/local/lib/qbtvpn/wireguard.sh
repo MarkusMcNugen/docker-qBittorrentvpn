@@ -14,6 +14,7 @@ WG_ADDRESSES=()
 WG_DNS=()
 WG_MTU=""
 WG_USERSPACE_PID=""
+WG_DOWN_REASON=""
 WG_ENDPOINT_IPS=()
 
 wg_pick_config() {
@@ -168,11 +169,21 @@ wg_create_interface() {
     log_warn "wireguard: kernel module unavailable (${err}); using wireguard-go"
   fi
   install -d -o vpn -g vpn -m 0700 /run/wireguard
-  env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LOG_LEVEL=error \
+  # A wireguard-go ended by a signal leaves its socket behind. The loop below
+  # would take it for the new process's socket, and wg, finding nothing
+  # listening on it, would configure the interface through the kernel instead.
+  rm -f "/run/wireguard/${WG_IF}.sock"
+  # WG_PROCESS_FOREGROUND=1, which wireguard-go sets for itself when it runs in
+  # the background, keeps it from printing its banner about the kernel module
+  # at every start; with -f it runs in the foreground either way.
+  env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LOG_LEVEL=error WG_PROCESS_FOREGROUND=1 \
     setpriv --reuid=vpn --regid=vpn --init-groups \
     --inh-caps=-all,+net_admin --ambient-caps=-all,+net_admin --bounding-set=-all,+net_admin \
     --no-new-privs -- wireguard-go -f "$WG_IF" &
   WG_USERSPACE_PID=$!
+  # Disowned, so bash prints no job notice of its own when a signal ends it;
+  # the supervisor recreates the interface. wg_alive and wg_down poll the pid.
+  disown "$WG_USERSPACE_PID"
   for _ in $(seq 1 50); do
     if [ -S "/run/wireguard/${WG_IF}.sock" ]; then
       log_info "wireguard: wireguard-go running as user vpn (pid ${WG_USERSPACE_PID})"
@@ -233,10 +244,24 @@ wg_handshake_age() {
   fi
 }
 
+# True when the interface exists with its peers and, for wireguard-go, the
+# process runs; sets WG_DOWN_REASON when it is not. The supervisor recreates
+# the interface in place, where bash's set -e does not apply, so an interface
+# left without its configuration is caught here and recreated again.
+# shellcheck disable=SC2034  # WG_DOWN_REASON is read by vpn_healthy in vpn.sh
 wg_alive() {
-  ip link show dev "$WG_IF" >/dev/null 2>&1 || return 1
-  if [ -n "$WG_USERSPACE_PID" ]; then
-    kill -0 "$WG_USERSPACE_PID" 2>/dev/null || return 1
+  local peers
+  if ! ip link show dev "$WG_IF" >/dev/null 2>&1; then
+    WG_DOWN_REASON="${WG_IF} is gone"
+    return 1
+  fi
+  if [ -n "$WG_USERSPACE_PID" ] && ! kill -0 "$WG_USERSPACE_PID" 2>/dev/null; then
+    WG_DOWN_REASON="wireguard-go exited"
+    return 1
+  fi
+  if ! peers=$(wg show "$WG_IF" peers 2>&1) || [ -z "$peers" ]; then
+    WG_DOWN_REASON="${WG_IF} has no peer${peers:+ (${peers})}"
+    return 1
   fi
   return 0
 }
@@ -262,7 +287,14 @@ wg_down() {
   fi
   if [ -n "$WG_USERSPACE_PID" ] && kill -0 "$WG_USERSPACE_PID" 2>/dev/null; then
     kill -TERM "$WG_USERSPACE_PID"
-    wait "$WG_USERSPACE_PID" 2>/dev/null
+    for _ in $(seq 1 50); do
+      kill -0 "$WG_USERSPACE_PID" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$WG_USERSPACE_PID" 2>/dev/null; then
+      log_warn "wireguard: wireguard-go still running after 10 s; sending SIGKILL"
+      kill -KILL "$WG_USERSPACE_PID"
+    fi
   fi
   log_info "wireguard: ${WG_IF} removed"
   return 0

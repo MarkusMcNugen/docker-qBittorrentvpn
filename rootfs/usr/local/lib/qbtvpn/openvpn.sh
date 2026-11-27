@@ -171,6 +171,10 @@ ovpn_start() {
     --no-new-privs -- openvpn "${args[@]}" \
     > >(awk '!/MANAGEMENT: (Client (connected|disconnected)|CMD .state.)/ { print; fflush() }') 2>&1 &
   OVPN_PID=$!
+  # Disowned, so bash prints no job notice of its own when a signal ends
+  # OpenVPN; the supervisor logs the exit and restarts it. Bash still reaps it,
+  # but keeps no exit status, so ovpn_alive and ovpn_stop poll the pid.
+  disown "$OVPN_PID"
   log_info "openvpn: started as user vpn (pid ${OVPN_PID})"
 }
 
@@ -250,8 +254,11 @@ ovpn_stop() {
     if ovpn_alive; then
       log_warn "openvpn: still running after 10 s; sending SIGKILL"
       kill -KILL "$OVPN_PID"
+      for _ in $(seq 1 20); do
+        ovpn_alive || break
+        sleep 0.1
+      done
     fi
-    wait "$OVPN_PID" 2>/dev/null
     log_info "openvpn: stopped"
   fi
   return 0

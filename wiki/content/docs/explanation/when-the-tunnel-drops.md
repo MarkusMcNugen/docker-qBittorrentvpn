@@ -12,7 +12,7 @@ Every `VPN_CHECK_INTERVAL` seconds (15 by default) the supervisor checks the tun
 | VPN | Healthy when | Repaired in place |
 |---|---|---|
 | OpenVPN | Its management interface reports `CONNECTED` | When the OpenVPN process has exited, it is started again with the same pinned configuration |
-| WireGuard | The last handshake is at most `WIREGUARD_HANDSHAKE_MAX_AGE` seconds old (180) | When `wg0` is gone, it is created again with the same configuration |
+| WireGuard | The last handshake is at most `WIREGUARD_HANDSHAKE_MAX_AGE` seconds old (180) | When `wg0` is gone, `wireguard-go` has exited, or `wg0` has no peer, it is created again with the same configuration, at every check until it works |
 
 WireGuard's handshake age tells only when the tunnel carries traffic, so it needs a keepalive. The container adds `PersistentKeepalive = 25` (`WIREGUARD_KEEPALIVE`) to peers that set none; with `WIREGUARD_KEEPALIVE=0` and no keepalive in the file, the check looks at the interface only, and says so in the log at start.
 

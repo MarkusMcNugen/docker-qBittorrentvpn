@@ -14,7 +14,7 @@ bash tests/run.sh e2e [IMAGE] [SCENARIO...]
 
 ## Unit tests
 
-85 tests in `tests/unit/`, run inside the image so they use its own bash, busybox, awk, iptables and Privoxy. Each test runs in a separate bash process, and `harness.sh` proves the runner fails a test whose first assertion fails.
+88 tests in `tests/unit/`, run inside the image so they use its own bash, busybox, awk, iptables and Privoxy. Each test runs in a separate bash process, and `harness.sh` proves the runner fails a test whose first assertion fails.
 
 | File | Tests | What it covers |
 |---|---|---|
@@ -29,9 +29,10 @@ bash tests/run.sh e2e [IMAGE] [SCENARIO...]
 | `portforward.sh` | 10 | NAT-PMP through the image's `natpmpc`, and PIA's API from PIA's published examples |
 | `privoxy.sh` | 6 | Privoxy's configuration, checked by Privoxy itself, and its log lines |
 | `qbittorrent.sh` | 10 | qBittorrent.conf as the container writes it for 5.3 and for earlier releases, migration from 1.x, `QBT_CONF_` against the enforced keys, the WebUI password hash checked against Python's `hashlib`, and the WebAPI key |
+| `vpn.sh` | 3 | Giving `/dev/net/tun` to the vpn group, and a device owned outside the container's user namespace, as under rootless Docker or Podman: used as it is when the vpn user can open it, refused when it cannot |
 | `wireguard.sh` | 4 | Parsing WireGuard configurations, checked by `wg` |
 
-Output, from the run that checked release 2.1.1:
+Output, from the run that checked release 2.1.2:
 
 ```text
 ok    common.sh test_bool_value_spellings
@@ -44,7 +45,7 @@ ok    privoxy.sh test_prepare_passes_privoxys_own_check_and_names_the_firewall_u
 ...
 ok    wireguard.sh test_wg_accepts_the_stripped_configuration
 
-85 passed, 0 failed
+88 passed, 0 failed
 ```
 
 ## End-to-end tests
@@ -53,26 +54,32 @@ ok    wireguard.sh test_wg_accepts_the_stripped_configuration
 
 | Scenario | Checks | What it proves |
 |---|---|---|
-| `wireguard` | 49 | Traffic, DNS and IPv6 only through the tunnel, each refusal next to a control showing the same request answered without the firewall; the WebUI login; qBittorrent's binding and privileges; NAT-PMP port forwarding; Privoxy's traffic through the tunnel and its refusals; `wg0` deleted and recreated in place; the server down and back; the health check turning unhealthy, then the exit after `VPN_RECOVERY_TIMEOUT` in shutdown order |
-| `openvpn` | 39 | The same traffic and DNS checks over OpenVPN, IPv6 assigned by the server routed into the tunnel, OpenVPN's user and capability, Privoxy off by default, OpenVPN killed and restarted in place, the server down and back, and a clean `docker stop` |
-| `openvpn_no_ipv6` | 10 | OpenVPN connecting in a container with IPv6 switched off while the server pushes IPv6, with no IPv6 on `tun0` |
+| `wireguard` | 51 | Traffic, DNS and IPv6 only through the tunnel, each refusal next to a control showing the same request answered without the firewall; the WebUI login; qBittorrent's binding and privileges; NAT-PMP port forwarding; Privoxy's traffic through the tunnel and its refusals; `wg0` deleted and recreated in place; the server down and back; the health check turning unhealthy, then the exit after `VPN_RECOVERY_TIMEOUT` in shutdown order |
+| `wireguard_userspace` | 10 | WireGuard through `wireguard-go`: traffic through the tunnel, `wireguard-go` as the vpn user and without its banner, killed and replaced in place, and a clean `docker stop` |
+| `openvpn` | 41 | The same traffic and DNS checks over OpenVPN, IPv6 assigned by the server routed into the tunnel, OpenVPN's user and capability, Privoxy off by default, OpenVPN killed and restarted in place, the server down and back, and a clean `docker stop` |
+| `openvpn_no_ipv6` | 11 | OpenVPN connecting in a container with IPv6 switched off while the server pushes IPv6, with no IPv6 on `tun0` |
+| `start_failure` | 5 | A start-up failure, an empty `/config`: exit status 1, the reason logged once, and no other error |
 
-Every scenario also fails on any warning or error in the container's log or the test server's. Before its refusal checks, a scenario proves that the wrapper they use fails a command that succeeds, so a refusal check cannot pass without running; a deleted `wg0` and a killed OpenVPN are each confirmed by the line the container logs when it repairs them. Names given after the image run only those scenarios.
+Every scenario also fails on any warning or error in the container's log or the test server's, and on any line bash itself writes there, such as a job notice. Before its refusal checks, a scenario proves that the wrapper they use fails a command that succeeds, so a refusal check cannot pass without running; a deleted `wg0` and a killed OpenVPN are each confirmed by the line the container logs when it repairs them. The probe after `wg0` is deleted runs with the supervisor paused, so its repair cannot race the probe, and a control first shows the paused probe reaching the target while `wg0` exists. Names given after the image run only those scenarios.
 
 `E2E_LOG_DIR=<directory>` keeps each scenario's container log and `qbtvpn-status` output there; the wiki's sample output comes from those files.
 
-Output, from the run that checked release 2.1.1:
+Output, from the run that checked release 2.1.2:
 
 ```text
-08:40:19 building the test double
-08:40:22 == WireGuard
-08:40:34 PASS WireGuard client became healthy
-08:40:35 qbtvpn-healthcheck: ok: wireguard handshake age 5
-08:40:35 PASS control: fails_quickly does not pass a command that succeeds
-08:40:35 PASS egress goes through the tunnel (target sees 172.31.251.2)
-08:40:35 PASS resolv.conf points at the tunnel DNS 10.13.0.1
+01:35:43 building the test double
+01:35:45 == WireGuard
+01:35:55 PASS WireGuard client became healthy
+01:35:55 qbtvpn-healthcheck: ok: wireguard handshake age 4
+01:35:55 PASS control: fails_quickly does not pass a command that succeeds
+01:35:55 PASS egress goes through the tunnel (target sees 172.31.251.2)
+01:35:55 PASS resolv.conf points at the tunnel DNS 10.13.0.1
 ...
-08:46:46 PASS docker stop exits cleanly
-08:46:47 PASS no packet left outside the tunnel
-08:46:48 98 passed, 0 failed
+01:42:07 == A start-up failure
+01:42:09 PASS stops when /config holds no VPN configuration
+01:42:09 PASS exit status is 1
+01:42:09 PASS the reason is logged once
+01:42:09 PASS nothing else is logged as an error
+01:42:09 PASS bash wrote no job notice or error of its own
+01:42:09 118 passed, 0 failed
 ```
