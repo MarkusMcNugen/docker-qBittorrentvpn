@@ -13,6 +13,8 @@ qBittorrent publishes no headless Linux builds, and distribution packages lag be
 | Weekly rebuild | Sundays, 03:43 UTC | Always, so Alpine's security fixes reach the image even when nothing else changed |
 | Manual run | on demand | When the versions differ, or always with the `force` option |
 
+GitHub starts scheduled runs late when it is busy, by hours at times. Every run of the workflow re-enables it, because GitHub disables the schedules of a public repository after 60 days without activity.
+
 ## How it is built
 
 1. **Sources.** `build/resolve-versions.sh` finds the newest stable qBittorrent release and the newest libtorrent release in the chosen series through the GitHub API. The qBittorrent tarball must carry a valid signature from the key in `keys/`, and both tarballs must match the SHA-256 digests GitHub records for them.
