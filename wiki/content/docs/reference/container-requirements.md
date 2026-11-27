@@ -16,9 +16,10 @@ What the container needs from Docker and the host, and what it refuses.
 
 ## Rootless Docker and Podman
 
-Rootless Docker, rootless Podman and a Docker daemon with `userns-remap` run the container in a user namespace, where the container's root is your own user on the host. OpenVPN and WireGuard both work there, with two differences:
+Rootless Docker, rootless Podman and a Docker daemon with `userns-remap` run the container in a user namespace, where the container's root is your own user on the host. OpenVPN and WireGuard both work there, with three differences:
 
 - `/dev/net/tun` belongs to a host user the container does not map, so the container cannot give it to the vpn group. It uses the device as it is when the vpn user can open it, which the usual host mode `0666` allows, and logs `vpn: /dev/net/tun belongs to nobody:nobody outside this container's user namespace`. Where the host's device is not `0666`, start-up stops with `the vpn user cannot open /dev/net/tun`; run `chmod 0666 /dev/net/tun` on the host.
+- OpenVPN runs without the kernel's data channel offload, which accepts peers only from a process privileged in the host's user namespace; the log says `openvpn: in a user namespace, so data channel offload is off`. The tun device carries the tunnel instead, as on kernels without the offload.
 - Your files appear inside the container as root's. Set `PUID=0` and `PGID=0`, so qBittorrent writes as your user on the host, still with no capabilities. Any other id is one of your subordinate ids from `/etc/subuid` on the host, and cannot write folders you own.
 
 With `PUID=0` the firewall cannot tell qBittorrent's connections from the container's own by user, so the rule that refuses qBittorrent the VPN servers' addresses is left out. The kill switch and qBittorrent's binding to the tunnel interface stay.

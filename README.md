@@ -169,7 +169,7 @@ Pull the new image and start it with the same volumes and variables. The OpenVPN
 | `keys/` | The OpenPGP key qBittorrent's tarballs are signed with |
 | `rootfs/usr/local/bin/` | `qbtvpn-entrypoint`, `qbtvpn-healthcheck`, `qbtvpn-status` |
 | `rootfs/usr/local/lib/qbtvpn/` | Firewall, network, DNS, OpenVPN, WireGuard, port forwarding, Privoxy and qBittorrent configuration |
-| `tests/` | Unit tests, end-to-end leak tests and their test doubles |
+| `tests/` | Unit tests, end-to-end leak tests, rootless Podman tests, the CVE scan and the test doubles |
 | `wiki/` | The documentation site, built with Hugo and the Hextra theme |
 | `docs/` | Pointers from the old documentation pages to the wiki |
 | `.github/workflows/` | CI on every branch but `main`; scheduled publishing and the wiki's deployment from `main` |
@@ -180,6 +180,8 @@ Pull the new image and start it with the same volumes and variables. The OpenVPN
 docker buildx build --build-arg "$(bash build/resolve-qt.sh)" -t qbittorrentvpn:dev .
 bash tests/run.sh unit qbittorrentvpn:dev
 bash tests/run.sh e2e qbittorrentvpn:dev
+bash tests/run.sh rootless qbittorrentvpn:dev
+bash tests/run.sh cve qbittorrentvpn:dev
 ```
 
 Build arguments select versions: `QBITTORRENT_VERSION`, `LIBTORRENT_SERIES` (`2.1`, `2.0` or `1.2`), `LIBTORRENT_VERSION`, `QT_VERSION` (printed by `build/resolve-qt.sh`), and `INSTALL_PYTHON=no` for an image without the search plugins' Python. [Build and test](https://markusmcnugen.github.io/docker-qBittorrentvpn/docs/how-to/build-and-test/) covers them and the tests.

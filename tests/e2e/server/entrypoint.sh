@@ -101,6 +101,11 @@ script-security 2
 auth-user-pass-verify /usr/local/bin/ovpn-check-user via-file
 verb 3
 EOF
+    # The kernel's data channel offload adds peers only for a process
+    # privileged in the host's user namespace, which a rootless server is not.
+    if ! awk 'NR == 1 && $1 == 0 && $2 == 0 && $3 == 4294967295 { w = 1 } END { exit !(w && NR == 1) }' /proc/self/uid_map; then
+      echo disable-dco >>server.conf
+    fi
     {
       printf 'client\ndev tun\nproto udp\nremote %s 1194\nnobind\npersist-key\npersist-tun\nremote-cert-tls server\nauth-user-pass\nverb 3\n' "${ENDPOINT_NAME:-e2e-ovpn}"
       printf '<ca>\n%s\n</ca>\n<cert>\n%s\n</cert>\n<key>\n%s\n</key>\n' "$(cat ca.crt)" "$(cat client.crt)" "$(cat client.key)"

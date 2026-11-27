@@ -9,6 +9,7 @@ NET_ADDR=""      # its IPv4 address
 NET_LOCAL=()     # "dev cidr" for each directly connected IPv4 subnet outside the tunnel
 NET_RESOLVERS=() # nameservers of the resolv.conf the container started with
 NET_SYSCTL="${NET_SYSCTL:-/proc/sys/net}" # the kernel's network settings
+NET_UID_MAP="${NET_UID_MAP:-/proc/self/uid_map}" # this process's user namespace mapping
 
 # Exits when the container shares the host's network namespace, where the
 # firewall this image installs would replace the host's own.
@@ -171,6 +172,14 @@ ipv6_disabled() {
     fi
   done
   return 1
+}
+
+# True when this process runs in a user namespace other than the host's, as
+# under rootless Docker or Podman or a daemon with userns-remap. The host's
+# own namespace maps every uid to itself: one line, 0 0 4294967295.
+in_user_namespace() {
+  [ -r "$NET_UID_MAP" ] || return 1
+  ! awk 'NR == 1 && $1 == 0 && $2 == 0 && $3 == 4294967295 { whole = 1 } END { exit !(whole && NR == 1) }' "$NET_UID_MAP"
 }
 
 # Removes IPv6 addresses and routes from every interface but loopback. Used

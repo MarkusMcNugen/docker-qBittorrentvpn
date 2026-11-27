@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.3] - 2026-11-26
+
+### VPN
+- OpenVPN connects in a rootless container on a kernel with OpenVPN's data channel offload: Linux 6.16 and later, or the `ovpn-dco` module. The kernel adds offload peers only for a process privileged in the host's user namespace, so in a user namespace OpenVPN set up the offload and then failed to add the server, which a server reports as `AUTH_FAILED`. In a user namespace the image now runs OpenVPN with `--disable-dco`, and the tun device carries the tunnel.
+
+### Security
+- Every package in the image is upgraded to the newest in the Alpine branch as it is built, those the Alpine base image ships included. Only the packages the image adds were current before, so the weekly rebuild missed fixes to the base image's own, such as zlib, busybox and OpenSSL's libraries, until Docker refreshed `alpine:3.24`; 2.1.2 shipped zlib 1.3.2-r1 with CVE-2026-4738, fixed in 1.4-r0.
+- A CVE scan, `tests/run.sh cve`: Trivy lists every known vulnerability and secret in the image and fails on any vulnerability that has a fix, or any secret. CI runs it on amd64 and arm64, and Publish runs it before it pushes an image.
+
+### Tests
+- Rootless tests: `tests/run.sh rootless` runs the image under rootless Podman as an ordinary user, with OpenVPN, WireGuard in the kernel and `wireguard-go` in turn. Each must connect through the tunnel, use a tun device owned outside the container's user namespace, recover in place after its VPN process is killed or `wg0` is deleted, and stop cleanly. CI runs it on amd64 and arm64, and so does Publish before it pushes an image, so a change that breaks rootless Docker or Podman, as 2.0 did, fails before release. Release 2.1.1 fails it.
+
 ## [2.1.2] - 2026-11-26
 
 ### VPN

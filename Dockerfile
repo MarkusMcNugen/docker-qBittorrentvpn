@@ -62,11 +62,16 @@ SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
 COPY --from=builder /out/ /
 
+# apk upgrade comes first so the packages the base image ships, such as zlib,
+# busybox and OpenSSL's libraries, get the Alpine branch's security fixes like
+# the packages added here. Publish sets IMAGE_CREATED to the build's time, so
+# there this step never comes from the build cache.
 # The vpn user (873) runs OpenVPN and wireguard-go with only CAP_NET_ADMIN.
 # The privoxy user (874) runs Privoxy with no capabilities; it is created
 # before the package, whose install script would otherwise pick its id. The
 # package installs its configuration files with a .new suffix.
-RUN addgroup -S -g 874 privoxy \
+RUN apk upgrade --no-cache \
+ && addgroup -S -g 874 privoxy \
  && adduser -S -D -H -u 874 -G privoxy -h /var/log/privoxy -s /sbin/nologin privoxy \
  && apk add --no-cache \
         bash \

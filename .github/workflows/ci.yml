@@ -28,7 +28,8 @@ jobs:
           /tmp/shellcheck-v0.11.0/shellcheck -x -s bash -e SC1091 \
             build/*.sh rootfs/usr/local/lib/qbtvpn/*.sh rootfs/usr/local/lib/qbtvpn/openvpn-hook \
             rootfs/usr/local/bin/* tests/run.sh tests/lib/*.sh tests/unit/*.sh \
-            tests/e2e/run.sh tests/e2e/server/entrypoint.sh tests/e2e/server/ovpn-check-user
+            tests/e2e/run.sh tests/e2e/server/entrypoint.sh tests/e2e/server/ovpn-check-user \
+            tests/rootless/run.sh tests/cve/run.sh
       - name: hadolint
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
@@ -77,3 +78,12 @@ jobs:
         run: bash tests/run.sh unit qbittorrentvpn:ci
       - name: End-to-end tunnel and leak tests
         run: bash tests/run.sh e2e qbittorrentvpn:ci
+      - name: Rootless Podman tests
+        run: |
+          if ! command -v podman >/dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q podman
+          fi
+          bash tests/run.sh rootless qbittorrentvpn:ci
+      - name: CVE scan
+        run: bash tests/run.sh cve qbittorrentvpn:ci

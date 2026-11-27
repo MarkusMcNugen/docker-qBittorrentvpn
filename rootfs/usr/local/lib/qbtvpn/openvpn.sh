@@ -157,6 +157,13 @@ ovpn_start() {
     args+=(--pull-filter ignore ifconfig-ipv6 --pull-filter ignore route-ipv6)
     log_info "openvpn: IPv6 is disabled in this container; ignoring the server's IPv6 address and routes"
   fi
+  # The kernel's OpenVPN data channel offload accepts new peers only from a
+  # process privileged in the host's user namespace, so in a rootless
+  # container OpenVPN would set up the offload and then fail to add the server.
+  if in_user_namespace; then
+    args+=(--disable-dco)
+    log_info "openvpn: in a user namespace, so data channel offload is off and the tun device carries the tunnel"
+  fi
   if [ "$OVPN_IS_PIA" = yes ] && [ "$CFG_PF_MODE" != off ]; then
     args+=(--tls-verify "$QBTVPN_LIB/openvpn-hook")
   fi

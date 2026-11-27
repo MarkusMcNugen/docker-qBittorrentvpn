@@ -110,6 +110,15 @@ jobs:
         run: bash tests/run.sh unit qbittorrentvpn:candidate
       - name: End-to-end tunnel and leak tests
         run: bash tests/run.sh e2e qbittorrentvpn:candidate
+      - name: Rootless Podman tests
+        run: |
+          if ! command -v podman >/dev/null; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q podman
+          fi
+          bash tests/run.sh rootless qbittorrentvpn:candidate
+      - name: CVE scan
+        run: bash tests/run.sh cve qbittorrentvpn:candidate
       - name: Registries
         id: registries
         env:

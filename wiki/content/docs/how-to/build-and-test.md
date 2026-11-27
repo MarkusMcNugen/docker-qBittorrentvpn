@@ -25,8 +25,10 @@ GITHUB_TOKEN=<token> docker buildx build --secret id=github_token,env=GITHUB_TOK
 ```bash
 bash tests/run.sh unit qbittorrentvpn:dev
 bash tests/run.sh e2e qbittorrentvpn:dev
+bash tests/run.sh rootless qbittorrentvpn:dev
+bash tests/run.sh cve qbittorrentvpn:dev
 ```
 
-The unit tests run inside the image, so they need only Docker and an image built with Python, the default. The end-to-end tests need a Docker host with the WireGuard kernel module; they start test servers in containers and record the image's traffic with tcpdump. One scenario runs alone by name, such as `bash tests/run.sh e2e qbittorrentvpn:dev openvpn`. What each suite checks, and the output to expect, is in [Tests](../../reference/tests/).
+The unit tests run inside the image, so they need only Docker and an image built with Python, the default. The end-to-end tests need a Docker host with the WireGuard kernel module; they start test servers in containers and record the image's traffic with tcpdump. One scenario runs alone by name, such as `bash tests/run.sh e2e qbittorrentvpn:dev openvpn`. The rootless tests need rootless Podman as well, and run as your own user, not with sudo. The CVE scan runs Trivy in a container and needs only Docker. What each suite checks, and the output to expect, is in [Tests](../../reference/tests/).
 
-Pull requests and every branch but `main` run the same build and both suites on amd64 and arm64 in GitHub Actions.
+Pull requests and every branch but `main` run the same build, the three test suites and the CVE scan on amd64 and arm64 in GitHub Actions.

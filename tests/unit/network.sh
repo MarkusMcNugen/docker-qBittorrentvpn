@@ -40,3 +40,26 @@ test_ipv6_enabled_in_the_test_container() {
   NET_SYSCTL=/proc/sys/net
   assert_fails ipv6_disabled
 }
+
+# uid_map LINE...: points NET_UID_MAP at a stand-in holding LINEs.
+uid_map() {
+  NET_UID_MAP="$QBTVPN_RUN/uid_map"
+  printf '%s\n' "$@" >"$NET_UID_MAP"
+}
+
+test_the_hosts_user_namespace_is_not_a_user_namespace() {
+  uid_map '         0          0 4294967295'
+  assert_fails in_user_namespace
+}
+
+test_rootless_mappings_are_a_user_namespace() {
+  uid_map '         0       1000          1' '         1     100000      65536'
+  assert_succeeds in_user_namespace
+  uid_map '         0     100000      65536'
+  assert_succeeds in_user_namespace
+}
+
+test_no_uid_map_is_not_a_user_namespace() {
+  NET_UID_MAP="$QBTVPN_RUN/no-such-uid_map"
+  assert_fails in_user_namespace
+}

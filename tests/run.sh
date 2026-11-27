@@ -4,6 +4,10 @@
 #                               so they use the image's own bash, busybox and awk
 #   tests/run.sh e2e [IMAGE]    end-to-end tunnel, kill-switch and leak tests on this
 #                               Docker host; needs sudo for tcpdump on the bridge
+#   tests/run.sh rootless [IMAGE] [MODE...]
+#                               the image under rootless Podman, as an ordinary
+#                               user: OpenVPN and WireGuard connect, recover and stop
+#   tests/run.sh cve [IMAGE]    Trivy's CVE and secret scan; fails on anything fixable
 #   tests/run.sh in-container   what `unit` runs inside the image
 #
 # Exits non-zero when any test fails.
@@ -63,8 +67,15 @@ case "$cmd" in
     shift $(($# >= 2 ? 2 : $#))
     exec bash "$here/e2e/run.sh" "$image" "$@"
     ;;
+  rootless)
+    shift $(($# >= 2 ? 2 : $#))
+    exec bash "$here/rootless/run.sh" "$image" "$@"
+    ;;
+  cve)
+    exec bash "$here/cve/run.sh" "$image"
+    ;;
   *)
-    echo "usage: tests/run.sh unit|e2e [IMAGE]" >&2
+    echo "usage: tests/run.sh unit|e2e|rootless|cve [IMAGE]" >&2
     exit 2
     ;;
 esac

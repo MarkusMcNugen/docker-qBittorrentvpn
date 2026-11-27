@@ -3,18 +3,20 @@ title: Tests
 weight: 7
 ---
 
-`tests/run.sh` runs both suites against an image. GitHub Actions runs them on amd64 and arm64 for every branch but `main`, and again before any image is published.
+`tests/run.sh` runs each suite against an image. GitHub Actions runs them on amd64 and arm64 for every branch but `main`, and again before any image is published.
 
 ```bash
 bash tests/run.sh unit [IMAGE]
 bash tests/run.sh e2e [IMAGE] [SCENARIO...]
+bash tests/run.sh rootless [IMAGE] [MODE...]
+bash tests/run.sh cve [IMAGE]
 ```
 
 `IMAGE` defaults to `qbittorrentvpn:dev`. Each exits with status 0 when every test passes and 1 otherwise. How to build an image to test is in [Build and test](../../how-to/build-and-test/).
 
 ## Unit tests
 
-88 tests in `tests/unit/`, run inside the image so they use its own bash, busybox, awk, iptables and Privoxy. Each test runs in a separate bash process, and `harness.sh` proves the runner fails a test whose first assertion fails.
+91 tests in `tests/unit/`, run inside the image so they use its own bash, busybox, awk, iptables and Privoxy. Each test runs in a separate bash process, and `harness.sh` proves the runner fails a test whose first assertion fails.
 
 | File | Tests | What it covers |
 |---|---|---|
@@ -23,7 +25,7 @@ bash tests/run.sh e2e [IMAGE] [SCENARIO...]
 | `firewall.sh` | 14 | The rendered rulesets line by line, and the kernel's `iptables-restore --test` accepting every one, with Privoxy off and on |
 | `harness.sh` | 1 | The runner itself |
 | `ini.sh` | 8 | Editing qBittorrent.conf |
-| `network.sh` | 4 | Telling whether a new interface can take IPv6 |
+| `network.sh` | 7 | Telling whether a new interface can take IPv6, and whether the container runs in a user namespace |
 | `openvpn.sh` | 2 | Routing IPv6 into the tunnel |
 | `openvpn_config.sh` | 12 | Sanitizing and pinning OpenVPN configurations |
 | `portforward.sh` | 10 | NAT-PMP through the image's `natpmpc`, and PIA's API from PIA's published examples |
@@ -32,7 +34,7 @@ bash tests/run.sh e2e [IMAGE] [SCENARIO...]
 | `vpn.sh` | 3 | Giving `/dev/net/tun` to the vpn group, and a device owned outside the container's user namespace, as under rootless Docker or Podman: used as it is when the vpn user can open it, refused when it cannot |
 | `wireguard.sh` | 4 | Parsing WireGuard configurations, checked by `wg` |
 
-Output, from the run that checked release 2.1.2:
+Output, from the run that checked release 2.1.3:
 
 ```text
 ok    common.sh test_bool_value_spellings
@@ -45,7 +47,7 @@ ok    privoxy.sh test_prepare_passes_privoxys_own_check_and_names_the_firewall_u
 ...
 ok    wireguard.sh test_wg_accepts_the_stripped_configuration
 
-88 passed, 0 failed
+91 passed, 0 failed
 ```
 
 ## End-to-end tests
@@ -82,4 +84,53 @@ Output, from the run that checked release 2.1.2:
 01:42:09 PASS nothing else is logged as an error
 01:42:09 PASS bash wrote no job notice or error of its own
 01:42:09 118 passed, 0 failed
+```
+
+## Rootless tests
+
+`tests/rootless/run.sh` runs the image under rootless Podman as an ordinary user, the way a rootless Docker or Podman host runs it: the host's `/dev/net/tun` belongs to a user the container does not map. The same test double plays the provider. For OpenVPN, WireGuard in the kernel and `wireguard-go` in turn, the client runs with `PUID=0` and must:
+
+- become healthy and reach the target through the tunnel
+- use the tun device as it is, for OpenVPN and `wireguard-go`
+- run OpenVPN without the kernel's data channel offload, which refuses peers in a user namespace
+- recover in place after its VPN process is killed, or after `wg0` is deleted
+- stop with exit status 0, taking the VPN down after the stop signal
+- log no error and no line of bash's own
+
+Modes named after the image run only those. The image is copied from Docker into Podman unless Podman already has it; the suite stops with the reason when the host cannot run rootless Podman at all. Release 2.1.1 fails it: its client stops at start-up with OpenVPN and `wireguard-go`.
+
+Output, from the run that checked release 2.1.2:
+
+```text
+02:20:55 building the test double
+02:20:58 == openvpn
+02:21:10 PASS openvpn: client became healthy
+02:21:10 PASS openvpn: egress goes through the tunnel (target sees 172.31.251.3)
+02:21:10 PASS openvpn: /dev/net/tun owned outside the user namespace is used as it is
+02:21:10 PASS openvpn: pkill -KILL -x openvpn
+...
+02:21:41 PASS wg-userspace: the supervisor repairs it in place and traffic flows again
+02:21:43 PASS wg-userspace: podman stop exits cleanly
+02:21:43 PASS wg-userspace: the stop takes the VPN down (wireguard: wg0 removed)
+02:21:43 PASS wg-userspace: the client logged no error
+02:21:43 PASS wg-userspace: bash wrote no job notice or error of its own
+02:21:44 26 passed, 0 failed
+```
+
+## CVE scan
+
+`tests/cve/run.sh` runs Trivy, pinned by version and digest, against the image in the local Docker daemon. It first lists every known vulnerability in the image's packages and any secret in its files, then fails on any vulnerability that has a fix, and on any secret. The image upgrades every package when it is built, so a fixable finding means a fix it should have and does not; a vulnerability with no fix yet is listed but does not fail the scan. qBittorrent and libtorrent are built from source and carry no package metadata, so no scanner sees them; the image builds their latest releases, which have no known CVE. `TRIVY_CACHE_DIR` keeps Trivy's database between runs.
+
+Release 2.1.2 fails it on zlib's CVE-2026-4738, fixed in Alpine's zlib 1.4-r0, which its build did not upgrade to. Output for the same image with every package upgraded, as 2.1.3 builds it:
+
+```text
+== findings with a fix, and secrets: any fails the scan
+
+Report Summary
+
+┌───────────────────────────────────────────┬────────┬─────────────────┬─────────┐
+│                  Target                   │  Type  │ Vulnerabilities │ Secrets │
+├───────────────────────────────────────────┼────────┼─────────────────┼─────────┤
+│ qbtvpn-cve-check:upgraded (alpine 3.24.4) │ alpine │        0        │    -    │
+└───────────────────────────────────────────┴────────┴─────────────────┴─────────┘
 ```
